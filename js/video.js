@@ -41,12 +41,19 @@ export function planVideo(meta, level, hevc) {
   return { width, height, bitrate, estimated, resize: scale < 1 };
 }
 
-let hevcOk;
-export async function pickCodec() {
-  if (hevcOk === undefined) {
-    hevcOk = await canEncodeVideo('hevc', { width: 1920, height: 1080, bitrate: 4e6 }).catch(() => false);
+// HEVC pesa ~35 % menos; se usa si el teléfono puede codificarlo a esa resolución.
+const codecCache = new Map();
+export async function pickCodec(width = 1920, height = 1080) {
+  const key = `${width}x${height}`;
+  if (!codecCache.has(key)) {
+    codecCache.set(key, (async () => {
+      for (const codec of ['hevc', 'avc']) {
+        if (await canEncodeVideo(codec, { width, height, bitrate: 4e6 }).catch(() => false)) return codec;
+      }
+      return null;
+    })());
   }
-  return hevcOk ? 'hevc' : 'avc';
+  return codecCache.get(key);
 }
 
 // ---------- Cajas MP4 ----------
@@ -145,30 +152,36 @@ export async function convertVideo(file, plan, codec, writable, onProgress, regi
   // Debe asignarse antes de crear el Output: ahí se construye el muxer que lee la fecha.
   globalThis.__compactaCreationTime = (await readCreationTime(file)) ?? file.lastModified;
   const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
-  const output = new Output({
-    format: new Mp4OutputFormat(),
-    target: new StreamTarget(writable, { chunked: true }),
-  });
-  const conversion = await Conversion.init({
-    input, output, showWarnings: false,
-    video: {
-      ...(plan.resize ? { width: plan.width, height: plan.height, fit: 'contain' } : {}),
-      codec, bitrate: plan.bitrate, forceTranscode: true,
-    },
-    audio: {},
-    tags: t => {
-      const raw = { ...t.raw };
-      for (const k of LOCATION) delete raw[k]; // la ubicación se copia aparte (injectLocation)
-      return { ...t, raw, comment: `${MARK} ${codec} ${Math.round(plan.bitrate / 1000)}k` };
-    },
-  });
-  if (!conversion.isValid) {
-    throw new Error('Formato no compatible: ' + conversion.discardedTracks.map(t => t.reason).join(', '));
+  try {
+    const output = new Output({
+      format: new Mp4OutputFormat(),
+      target: new StreamTarget(writable, { chunked: true }),
+    });
+    const conversion = await Conversion.init({
+      input, output, showWarnings: false,
+      video: {
+        ...(plan.resize ? { width: plan.width, height: plan.height, fit: 'contain' } : {}),
+        codec, bitrate: plan.bitrate, forceTranscode: true,
+      },
+      audio: {},
+      tags: t => {
+        const raw = { ...t.raw };
+        for (const k of LOCATION) delete raw[k]; // la ubicación se copia aparte (injectLocation)
+        return { ...t, raw, comment: `${MARK} ${codec} ${Math.round(plan.bitrate / 1000)}k` };
+      },
+    });
+    // Nunca reemplazar un video por uno sin sonido o sin imagen.
+    const lost = conversion.discardedTracks.filter(d => d.track.type === 'video' || d.track.type === 'audio');
+    if (!conversion.isValid || lost.length) {
+      throw new Error('Formato no compatible (' + (lost.map(d => `${d.track.type}: ${d.reason}`).join(', ') || 'sin pistas') + ')');
+    }
+    conversion.onProgress = onProgress;
+    registerCancel?.(() => conversion.cancel());
+    await conversion.execute();
+  } finally {
+    delete globalThis.__compactaCreationTime;
+    input.dispose?.();
   }
-  conversion.onProgress = onProgress;
-  registerCancel?.(() => conversion.cancel());
-  try { await conversion.execute(); }
-  finally { delete globalThis.__compactaCreationTime; input.dispose?.(); }
 }
 
 export async function verifyVideo(outFile, originalDuration) {

@@ -15,15 +15,17 @@ dispositivo; nada se sube a internet.
 - **Capturas PNG** → JPG (opcional).
 - **Videos** → HEVC (o H.264 si el teléfono no codifica HEVC) con WebCodecs, vía Mediabunny. Experimental.
 - **Conserva lo importante**: EXIF completo (fecha de captura, GPS, cámara), orientación corregida,
-  fecha de grabación de los videos. A las imágenes sin EXIF se les escribe `DateTimeOriginal` con la fecha
-  del archivo, para que la galería no las muestre como tomadas "hoy".
+  fecha de grabación y ubicación de los videos. A las imágenes sin fecha de captura (sin EXIF, o con EXIF
+  pero sin `DateTimeOriginal`) se les escribe la fecha del archivo, para que la galería no las muestre
+  como tomadas "hoy". Nunca reemplaza un video si la conversión perdería el audio o la imagen.
 - **Seguro**: escribe la copia en un temporal oculto, la verifica (se decodifica, tamaño, duración) y solo
   entonces mueve el original a `.compacta-papelera/` (con `.nomedia`, la galería no lo ve). Desde la app
   se puede **restaurar** o **vaciar** la papelera.
 - Antes de empezar, compacta de prueba unas fotos para **estimar el ahorro** y mostrar una **comparación
   antes/después** con zoom al 100 %.
 - Se salta lo que no baje al menos 20 %, lo que ya pasó por Compacta (marca `Compacta/1` en el JPEG / tag
-  de comentario en el MP4) y las fotos en movimiento (o les quita el movimiento, si se elige).
+  de comentario en el MP4) y las fotos 360°. Las fotos en movimiento y los retratos con desenfoque
+  editable se dejan igual, salvo que se elija compactarlas como foto fija.
 
 ## Requisitos
 
@@ -57,6 +59,11 @@ vendor/             @jsquash/jpeg 1.6.0 (Apache-2.0) y mediabunny 1.61.0 (MPL-2.
 test/               servidor y página de pruebas (los fixtures se generan localmente, no van al repo)
 ```
 
+## Usarla en la PC
+
+Doble clic en **`Iniciar Compacta.bat`**: levanta un servidor local y abre `http://localhost:8765/`.
+Abrir `index.html` directo (doble clic) **no funciona**: Chrome no carga módulos ni workers desde `file://`.
+
 ## Desarrollo y pruebas
 
 ```bash
@@ -66,4 +73,7 @@ python test/server.py 8765
 - `http://localhost:8765/test/` carga los fixtures de `test/fixtures/` en una carpeta privada del
   navegador (OPFS) y puede exportar el resultado a `test/out/` para revisarlo con PIL/ffprobe.
 - `http://localhost:8765/?opfs` abre la app usando esa carpeta de prueba, sin tocar archivos reales.
+- `python test/verify.py` revisa lo exportado (EXIF, orientación, fecha y audio de videos, decodificación).
+- `node test/exif-unit.mjs && python test/exif-unit-check.py` prueba la reescritura de EXIF (LE/BE, con y
+  sin directorio Exif, con y sin fecha).
 - Al publicar cambios, subir `VERSION` en `sw.js`.

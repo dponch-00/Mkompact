@@ -1,5 +1,5 @@
 // Cache de la app para que funcione sin internet. Subir VERSION en cada publicación.
-const VERSION = 'compacta-v1';
+const VERSION = 'compacta-v2';
 const FILES = [
   './', 'index.html', 'css/app.css', 'manifest.webmanifest',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',

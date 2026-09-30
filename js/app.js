@@ -22,31 +22,32 @@ const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&
 
 const state = {
   roots: [],          // { id, name, handle, ok }
-  analysis: null,     // { items, counts, candidates, videos, ... }
-  calib: {},          // nivel -> { ratio, samples: [{item, blob, size}] }
+  analysis: null,     // { items, counts, skip }
+  calib: {},          // nivel -> Promise<{ ratio, samples: [{item, blob, size}] }>
   running: false, paused: false, stopped: false, cancelVideo: null,
 };
+let renderSeq = 0; // descarta cálculos de ahorro viejos si cambian las opciones mientras tanto
 
 // ---------- Worker pool ----------
+// Cada foto decodificada ocupa ~4 bytes por pixel: con poca RAM se usan menos workers.
 const pool = (() => {
-  const size = Math.max(1, Math.min(2, (navigator.hardwareConcurrency || 2) - 1));
-  const workers = [], idle = [], queue = [], pending = new Map();
+  const mem = navigator.deviceMemory || 4;
+  const size = Math.max(1, Math.min(mem >= 8 ? 3 : 2, (navigator.hardwareConcurrency || 2) - 1));
+  const idle = [], queue = [];
   let seq = 0;
   for (let i = 0; i < size; i++) {
     const w = new Worker(new URL('./photo-worker.js', import.meta.url), { type: 'module' });
-    w.onmessage = ({ data }) => {
-      const p = pending.get(data.id); pending.delete(data.id);
-      data.ok ? p.resolve(data) : p.reject(new Error(data.error));
-      idle.push(w); next();
-    };
-    w.onerror = e => { e.preventDefault(); };
-    workers.push(w); idle.push(w);
+    const settle = (fn, value) => { const job = w.job; w.job = null; idle.push(w); next(); job?.[fn](value); };
+    w.onmessage = ({ data }) => data.ok ? settle('resolve', data) : settle('reject', new Error(data.error));
+    // Si el worker no carga o se cae, el trabajo falla en vez de quedarse esperando para siempre.
+    w.onerror = e => { e.preventDefault(); settle('reject', new Error(e.message || 'Falló el procesador de fotos')); };
+    idle.push(w);
   }
   function next() {
     while (idle.length && queue.length) {
-      const w = idle.pop(), job = queue.shift();
-      pending.set(job.msg.id, job);
-      w.postMessage(job.msg);
+      const w = idle.pop();
+      w.job = queue.shift();
+      w.postMessage(w.job.msg);
     }
   }
   return {
@@ -72,12 +73,13 @@ function readOpts() {
 }
 async function loadPrefs() {
   const p = await store.get('prefs', 'opts') || {};
-  document.querySelector(`input[name=level][value=${p.level || 'equilibrado'}]`).checked = true;
+  (document.querySelector(`input[name=level][value="${p.level}"]`) || document.querySelector('input[name=level][value=equilibrado]')).checked = true;
   if (p.photos !== undefined) $('opt-photos').checked = p.photos;
   if (p.png !== undefined) $('opt-png').checked = p.png;
   if (p.video !== undefined) $('opt-video').checked = p.video;
   if (p.trash !== undefined) $('opt-trash').checked = p.trash;
-  if (p.motion) document.querySelector(`input[name=motion][value=${p.motion}]`).checked = true;
+  const motion = document.querySelector(`input[name=motion][value="${p.motion}"]`);
+  if (motion) motion.checked = true;
   $('level-hint').textContent = LEVELS[readOpts().level].hint;
 }
 document.addEventListener('change', e => {
@@ -132,7 +134,7 @@ $('add-root').onclick = async () => {
   renderRoots();
 };
 
-function invalidate() { state.analysis = null; state.calib = {}; $('analysis').hidden = true; }
+function invalidate() { state.analysis = null; state.calib = {}; renderSeq++; $('analysis').hidden = true; }
 
 // ---------- Análisis ----------
 $('analyze').onclick = analyze;
@@ -173,18 +175,19 @@ async function analyze() {
 function selection(o) {
   const { items, skip } = state.analysis;
   const photos = [], videos = [];
-  const stats = { compacted: 0, motion: 0, remembered: 0, smallVideo: 0, lowVideo: 0 };
+  const stats = { compacted: 0, compactedVideo: 0, motion: 0, pano: 0, remembered: 0 };
   for (const it of items) {
     if (it.type === 'photo' || it.type === 'png') {
       if (it.type === 'photo' ? !o.photos : !o.png) continue;
       if (it.compacted) { stats.compacted++; continue; }
-      if (it.motion && o.motion === 'skip') { stats.motion++; continue; }
+      if (it.pano) { stats.pano++; continue; } // al reducirla perdería la vista 360°
+      if ((it.motion || it.special) && o.motion === 'skip') { stats.motion++; continue; }
       if (skip.has(`${it.key}|${o.level}`)) { stats.remembered++; continue; }
       if (it.size < 150 * 1024) continue; // ya es pequeña
       photos.push(it);
     } else if (it.type === 'video' && o.video) {
-      if (!it.meta || it.size < MIN_VIDEO) { stats.smallVideo++; continue; }
-      if (it.meta.compacted) { stats.compactedVideo = (stats.compactedVideo || 0) + 1; continue; }
+      if (!it.meta || it.size < MIN_VIDEO) continue;
+      if (it.meta.compacted) { stats.compactedVideo++; continue; }
       if (skip.has(`${it.key}|${o.level}`)) { stats.remembered++; continue; }
       videos.push(it);
     }
@@ -193,6 +196,7 @@ function selection(o) {
 }
 
 async function renderAnalysis() {
+  const seq = ++renderSeq;
   const o = readOpts();
   const { photos, videos, stats } = selection(o);
   const { counts } = state.analysis;
@@ -203,7 +207,8 @@ async function renderAnalysis() {
   if (o.video) facts.push(`<b>${nf.format(videos.length)}</b> videos para compactar (${fmtBytes(sum(videos))})`);
   if (stats.compacted) facts.push(`${nf.format(stats.compacted)} fotos ya estaban compactadas`);
   if (stats.compactedVideo) facts.push(`${nf.format(stats.compactedVideo)} videos ya estaban compactados`);
-  if (stats.motion) facts.push(`${nf.format(stats.motion)} fotos en movimiento se dejan igual (cámbialo en Opciones)`);
+  if (stats.motion) facts.push(`${nf.format(stats.motion)} fotos en movimiento o de retrato se dejan igual (cámbialo en Opciones)`);
+  if (stats.pano) facts.push(`${nf.format(stats.pano)} fotos 360° se dejan igual`);
   if (stats.remembered) facts.push(`${nf.format(stats.remembered)} archivos ya no se podían reducir más`);
   if (counts.heic) facts.push(`${nf.format(counts.heic)} fotos HEIC no se pueden procesar en el navegador`);
   const hdr = photos.filter(p => p.hdr).length;
@@ -216,10 +221,10 @@ async function renderAnalysis() {
   $('preview-btn').hidden = !photos.length;
 
   if (!total) { $('saving').innerHTML = 'Todo está compacto.<small>No hay nada que reducir con estas opciones.</small>'; return; }
-  const videoEst = await estimateVideos(videos, o.level);
   $('saving').innerHTML = `Calculando el ahorro…<small>Probando con algunas fotos</small>`;
+  const videoEst = await estimateVideos(videos, o.level);
   const calib = photos.length ? await calibrate(photos, o.level) : null;
-  if (readOpts().level !== o.level) return; // cambió mientras calculaba
+  if (seq !== renderSeq) return; // cambiaron las opciones mientras calculaba
   const photoOut = calib ? sum(photos) * calib.ratio : 0;
   const before = sum(photos) + sum(videos);
   const after = photoOut + videoEst;
@@ -236,8 +241,11 @@ async function estimateVideos(videos, level) {
 }
 
 // Compacta de verdad unas cuantas fotos (sin guardarlas) para estimar el ahorro y para la vista previa.
-async function calibrate(photos, level) {
-  if (state.calib[level]) return state.calib[level];
+// Se guarda la promesa: si la vista previa la pide mientras se calcula, no se repite el trabajo.
+function calibrate(photos, level) {
+  return (state.calib[level] ??= calibrateNow(photos, level));
+}
+async function calibrateNow(photos, level) {
   const n = Math.min(4, photos.length);
   const picks = Array.from({ length: n }, (_, i) => photos[Math.floor((i + 0.5) * photos.length / n)]);
   const samples = await Promise.all(picks.map(async item => {
@@ -247,10 +255,11 @@ async function calibrate(photos, level) {
     } catch { return null; }
   }));
   const ok = samples.filter(Boolean);
+  // Las que no bajarían al menos 20 % se quedan igual: cuentan como tamaño completo.
   const ratio = ok.length
-    ? ok.reduce((a, s) => a + Math.min(1, s.size / s.item.size), 0) / ok.length
+    ? ok.reduce((a, s) => { const r = s.size / s.item.size; return a + (r <= 1 - MIN_SAVING ? r : 1); }, 0) / ok.length
     : 0.5;
-  return (state.calib[level] = { ratio: Math.min(1, ratio < 1 - MIN_SAVING ? ratio : 1), samples: ok });
+  return { ratio, samples: ok };
 }
 
 // ---------- Vista previa ----------
@@ -263,9 +272,9 @@ $('preview-btn').onclick = async () => {
   showSample(calib.samples[pvIndex % calib.samples.length]);
   $('preview').showModal();
 };
-$('pv-next').onclick = () => {
-  const s = state.calib[readOpts().level].samples;
-  showSample(s[++pvIndex % s.length]);
+$('pv-next').onclick = async () => {
+  const { samples } = await state.calib[readOpts().level];
+  showSample(samples[++pvIndex % samples.length]);
 };
 $('pv-close').onclick = () => $('preview').close();
 $('preview').addEventListener('close', () => { pvUrls.forEach(URL.revokeObjectURL); pvUrls = []; });
@@ -386,12 +395,11 @@ async function process(photos, videos, o) {
   // Videos: de uno en uno (el codificador del teléfono es uno solo).
   if (videos.length && !state.stopped) {
     const vmod = await import('./video.js');
-    const codec = await vmod.pickCodec();
     for (const item of videos) {
       await waitIfPaused();
       if (state.stopped) break;
       update(`🎬 ${item.name}`);
-      const res = await doVideo(item, o, vmod, codec, p => update(`🎬 ${item.name} · ${Math.round(p * 100)} %`, item.size * p))
+      const res = await doVideo(item, o, vmod, p => update(`🎬 ${item.name} · ${Math.round(p * 100)} %`, item.size * p))
         .catch(e => ({ error: state.stopped ? 'Detenido' : e.message }));
       state.cancelVideo = null;
       await finish(item, res);
@@ -419,9 +427,8 @@ async function doPhoto(item, o) {
   const res = await pool.run(item.file, o.level);
   const out = res.buffer;
   if (out.byteLength > item.size * (1 - MIN_SAVING)) return { skipped: true };
-  const newName = item.type === 'png' ? item.name.replace(/\.png$/i, '.jpg') : item.name;
   return replaceFile({
-    root: item.root.handle, item, newName, keepOriginal: o.trash,
+    root: item.root.handle, item, keepOriginal: o.trash,
     write: w => w.write(out),
     verify: async f => {
       if (f.size !== out.byteLength) throw new Error('La copia no se guardó completa');
@@ -430,12 +437,15 @@ async function doPhoto(item, o) {
   });
 }
 
-async function doVideo(item, o, vmod, codec, onProgress) {
+async function doVideo(item, o, vmod, onProgress) {
+  const size = vmod.planVideo(item.meta, o.level, false);
+  const codec = await vmod.pickCodec(size.width, size.height);
+  if (!codec) throw new Error(`Este teléfono no puede codificar video de ${size.width}×${size.height}`);
   const plan = vmod.planVideo(item.meta, o.level, codec === 'hevc');
   if (plan.estimated > item.size * (1 - MIN_SAVING)) return { skipped: true };
   const gps = await vmod.readLocationBoxes(item.file).catch(() => null);
   const res = await replaceFile({
-    root: item.root.handle, item, newName: item.name.replace(/\.(mov|m4v|3gp)$/i, '.mp4'), keepOriginal: o.trash,
+    root: item.root.handle, item, keepOriginal: o.trash,
     write: w => vmod.convertVideo(item.file, plan, codec, w, onProgress, c => { state.cancelVideo = c; }),
     finalize: tmp => gps && vmod.injectLocation(tmp, gps),
     verify: async f => {

@@ -22,6 +22,14 @@
   </header>
 
   <main>
+    <div id="from-file" class="card warn" hidden>
+      <strong>Así no puede arrancar.</strong>
+      <p>Abriste el archivo directo desde la carpeta, y Chrome no deja funcionar la app de esa forma. En la PC usa <b>Iniciar Compacta.bat</b> (en la carpeta del proyecto); en el celular, ábrela desde su página web.</p>
+    </div>
+    <script>
+      // Los módulos y workers no cargan desde file://, así que app.js nunca arranca: avisarlo aquí.
+      if (location.protocol === 'file:') document.getElementById('from-file').hidden = false;
+    </script>
     <div id="unsupported" class="card warn" hidden>
       <strong>Este navegador no puede modificar carpetas.</strong>
       <p>Abre Compacta en <b>Chrome para Android (versión 132 o más nueva)</b> o en Chrome/Edge de computadora.</p>
@@ -52,10 +60,11 @@
         <label class="row"><input type="checkbox" id="opt-video"> Videos <span class="tag">experimental</span></label>
         <p class="hint indent">Los videos se procesan en el celular: tarda varios minutos por video y gasta batería. Conéctalo al cargador.</p>
         <fieldset class="row-group">
-          <legend>Fotos en movimiento (Motion Photo)</legend>
+          <legend>Fotos en movimiento y retratos con desenfoque editable</legend>
           <label class="row"><input type="radio" name="motion" value="skip" checked> No tocarlas</label>
-          <label class="row"><input type="radio" name="motion" value="strip"> Compactarlas y quitarles el movimiento</label>
+          <label class="row"><input type="radio" name="motion" value="strip"> Compactarlas como foto normal</label>
         </fieldset>
+        <p class="hint indent">Estas fotos guardan dentro un videoclip de 1–3 segundos o un mapa de profundidad, que suele pesar tanto como la foto. Al compactarlas quedan como foto fija: se pierde el movimiento o poder cambiar el desenfoque después. Las fotos 360° nunca se tocan.</p>
         <label class="row"><input type="checkbox" id="opt-trash" checked> Guardar los originales en la papelera de Compacta <span class="tag ok">recomendado</span></label>
         <p class="hint indent">Así revisas el resultado antes de liberar el espacio. Si lo desactivas, los originales se borran en cuanto se verifica la copia.</p>
       </details>

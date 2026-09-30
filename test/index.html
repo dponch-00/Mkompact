@@ -20,7 +20,7 @@ window.loadFixtures = async () => {
   for (const f of list) {
     const parts = f.path.split('/'); const name = parts.pop();
     const blob = await (await fetch('fixtures/' + f.path)).blob();
-    // OPFS no permite fijar la fecha: la original viaja en el nombre del objeto File que ve la app vía lastModified del fixture
+    // OPFS no permite fijar la fecha de modificación: todos los fixtures quedan con la fecha de hoy.
     const w = await (await (await dirOf(root, parts.join('/'), true)).getFileHandle(name, { create: true })).createWritable();
     await w.write(blob); await w.close();
     log('✓ ' + f.path);

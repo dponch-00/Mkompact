@@ -1,10 +1,15 @@
 // Operaciones sobre carpetas del celular (File System Access API).
-import { parseJpegHeader, tailHasSamsungMotion } from './jpeg.js';
+import { readJpegInfo } from './jpeg.js';
 
 export const TRASH = '.compacta-papelera';
 const TMP = '.compacta-tmp';
 
 const PHOTO = /\.(jpe?g)$/i, PNG = /\.png$/i, HEIC = /\.(heic|heif)$/i, VIDEO = /\.(mp4|mov|m4v|3gp)$/i;
+
+// Nombre que tendrá el archivo compactado (las capturas PNG pasan a JPG, los videos a MP4).
+export function targetName(name) {
+  return name.replace(/\.png$/i, '.jpg').replace(/\.(mov|m4v|3gp)$/i, '.mp4');
+}
 
 export async function ensurePermission(handle, ask) {
   const opts = { mode: 'readwrite' };
@@ -18,10 +23,11 @@ export async function scan(root, onProgress, signal) {
   const items = [];
   const counts = { files: 0, heic: 0 };
   async function walk(dir, path) {
+    const tmps = [];
     for await (const [name, h] of dir.entries()) {
       if (signal?.aborted) return;
       if (name.startsWith('.')) {
-        if (h.kind === 'file' && name.endsWith(TMP)) await recoverTmp(dir, name).catch(() => {});
+        if (h.kind === 'file' && name.endsWith(TMP)) tmps.push(name);
         continue;
       }
       if (h.kind === 'directory') { await walk(h, path ? `${path}/${name}` : name); continue; }
@@ -33,16 +39,15 @@ export async function scan(root, onProgress, signal) {
       const file = await h.getFile();
       const item = { dir, path, name, type, size: file.size, mtime: file.lastModified, file };
       if (type === 'photo') {
-        const head = parseJpegHeader(new Uint8Array(await file.slice(0, 256 * 1024).arrayBuffer()));
+        const head = await readJpegInfo(file);
         if (!head.isJpeg) continue;
-        Object.assign(item, { width: head.width, height: head.height, motion: head.motion, hdr: head.hdr, compacted: head.compacted });
-        if (!item.motion && file.size > 1024 * 1024) {
-          const tail = new Uint8Array(await file.slice(Math.max(0, file.size - 64 * 1024)).arrayBuffer());
-          item.motion = tailHasSamsungMotion(tail);
-        }
+        const { motion, special, pano, hdr, compacted } = head;
+        Object.assign(item, { motion, special, pano, hdr, compacted });
       }
       items.push(item);
     }
+    // Se recuperan después de recorrer: borrar o renombrar durante la iteración puede saltarse entradas.
+    for (const t of tmps) await recoverTmp(dir, t).catch(() => {});
   }
   await walk(root, '');
   onProgress?.(counts.files);
@@ -50,11 +55,12 @@ export async function scan(root, onProgress, signal) {
 }
 
 // Si una sesión anterior se interrumpió a medio reemplazo, deja todo en un estado sano.
+// El temporal se llama como el ORIGINAL (".foto.png.compacta-tmp"), así se sabe si el original sigue ahí.
 async function recoverTmp(dir, tmpName) {
-  const finalName = tmpName.slice(1, -TMP.length);
-  const exists = await dir.getFileHandle(finalName).then(() => true, () => false);
-  if (exists) await dir.removeEntry(tmpName);           // el original sigue ahí: se descarta el temporal
-  else await renameFile(dir, await dir.getFileHandle(tmpName), finalName); // el original ya se había movido
+  const origName = tmpName.slice(1, -TMP.length);
+  const exists = await dir.getFileHandle(origName).then(() => true, () => false);
+  if (exists) await dir.removeEntry(tmpName);  // no se alcanzó a reemplazar: se descarta el temporal
+  else await renameFile(dir, await dir.getFileHandle(tmpName), await uniqueName(dir, targetName(origName)));
 }
 
 async function getDirPath(root, path, create) {
@@ -102,9 +108,10 @@ async function trashDir(root) {
  *  3. mueve el original a la papelera (o lo borra)
  *  4. le da al temporal el nombre final
  */
-export async function replaceFile({ root, item, newName, write, finalize, verify, keepOriginal }) {
+export async function replaceFile({ root, item, write, finalize, verify, keepOriginal }) {
   const { dir, path, name } = item;
-  const tmpName = `.${newName}${TMP}`;
+  const newName = targetName(name);
+  const tmpName = `.${name}${TMP}`;
   const tmp = await dir.getFileHandle(tmpName, { create: true });
   try {
     const w = await tmp.createWritable();
