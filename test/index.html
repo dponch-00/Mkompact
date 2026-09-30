@@ -1,0 +1,46 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Compacta · pruebas</title>
+<body style="font:14px system-ui;padding:16px">
+<h1>Pruebas de Compacta</h1>
+<p>Copia <code>test/fixtures</code> a una carpeta privada del navegador (OPFS) y abre la app en modo <code>?opfs</code>.</p>
+<button id="load">Cargar fixtures en OPFS</button>
+<button id="export">Exportar OPFS a test/out</button>
+<pre id="log"></pre>
+<script type="module">
+const log = t => document.getElementById('log').textContent += t + '\n';
+async function dirOf(root, path, create) {
+  let d = root; for (const p of path.split('/').filter(Boolean)) d = await d.getDirectoryHandle(p, { create }); return d;
+}
+window.loadFixtures = async () => {
+  const opfs = await navigator.storage.getDirectory();
+  await opfs.removeEntry('prueba', { recursive: true }).catch(() => {});
+  const root = await opfs.getDirectoryHandle('prueba', { create: true });
+  const list = await (await fetch('fixtures/list.json')).json();
+  for (const f of list) {
+    const parts = f.path.split('/'); const name = parts.pop();
+    const blob = await (await fetch('fixtures/' + f.path)).blob();
+    // OPFS no permite fijar la fecha: la original viaja en el nombre del objeto File que ve la app vía lastModified del fixture
+    const w = await (await (await dirOf(root, parts.join('/'), true)).getFileHandle(name, { create: true })).createWritable();
+    await w.write(blob); await w.close();
+    log('✓ ' + f.path);
+  }
+  return list.length;
+};
+window.exportOut = async () => {
+  const root = await (await navigator.storage.getDirectory()).getDirectoryHandle('prueba');
+  const out = [];
+  async function walk(d, path) {
+    for await (const [n, h] of d.entries()) {
+      const p = path ? path + '/' + n : n;
+      if (h.kind === 'directory') await walk(h, p);
+      else { const f = await h.getFile(); await fetch('out/' + p, { method: 'PUT', body: f }); out.push([p, f.size]); }
+    }
+  }
+  await walk(root, '');
+  out.forEach(([p, s]) => log(`${p}  ${s}`));
+  return out;
+};
+document.getElementById('load').onclick = () => loadFixtures().then(n => log(n + ' archivos'));
+document.getElementById('export').onclick = () => exportOut();
+</script>

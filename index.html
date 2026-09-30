@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Compacta</title>
+  <meta name="description" content="Reduce el espacio de tus fotos y videos en el celular, conservando fecha, ubicación y calidad visible.">
+  <meta name="theme-color" content="#0f766e">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="css/app.css">
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <header class="top">
+    <img src="icons/icon.svg" alt="" width="32" height="32">
+    <div>
+      <h1>Compacta</h1>
+      <p class="sub">Fotos y videos más ligeros, sin salir de tu celular</p>
+    </div>
+  </header>
+
+  <main>
+    <div id="unsupported" class="card warn" hidden>
+      <strong>Este navegador no puede modificar carpetas.</strong>
+      <p>Abre Compacta en <b>Chrome para Android (versión 132 o más nueva)</b> o en Chrome/Edge de computadora.</p>
+    </div>
+
+    <!-- 1. Carpetas -->
+    <section class="card" id="folders-card">
+      <h2><span class="step">1</span> Carpetas a compactar</h2>
+      <ul id="roots" class="roots"></ul>
+      <button id="add-root" class="btn secondary">+ Agregar carpeta</button>
+      <p class="hint">Por ejemplo <code>DCIM/Camera</code>, <code>Pictures</code> o <code>WhatsApp/Media</code>. Android no permite elegir la raíz del almacenamiento ni <code>Download</code>.</p>
+    </section>
+
+    <!-- 2. Nivel -->
+    <section class="card">
+      <h2><span class="step">2</span> ¿Qué tanto compactar?</h2>
+      <div class="levels" role="radiogroup" aria-label="Nivel">
+        <label><input type="radio" name="level" value="suave"><span><b>Suave</b><small>Tamaño original, calidad 85</small></span></label>
+        <label><input type="radio" name="level" value="equilibrado"><span><b>Equilibrado</b><small>Hasta 2560 px, calidad 75</small></span></label>
+        <label><input type="radio" name="level" value="maximo"><span><b>Máximo</b><small>Hasta 1600 px, calidad 65</small></span></label>
+      </div>
+      <p class="hint" id="level-hint"></p>
+
+      <details class="opts">
+        <summary>Opciones</summary>
+        <label class="row"><input type="checkbox" id="opt-photos" checked> Fotos JPG</label>
+        <label class="row"><input type="checkbox" id="opt-png"> Capturas de pantalla PNG → JPG</label>
+        <label class="row"><input type="checkbox" id="opt-video"> Videos <span class="tag">experimental</span></label>
+        <p class="hint indent">Los videos se procesan en el celular: tarda varios minutos por video y gasta batería. Conéctalo al cargador.</p>
+        <fieldset class="row-group">
+          <legend>Fotos en movimiento (Motion Photo)</legend>
+          <label class="row"><input type="radio" name="motion" value="skip" checked> No tocarlas</label>
+          <label class="row"><input type="radio" name="motion" value="strip"> Compactarlas y quitarles el movimiento</label>
+        </fieldset>
+        <label class="row"><input type="checkbox" id="opt-trash" checked> Guardar los originales en la papelera de Compacta <span class="tag ok">recomendado</span></label>
+        <p class="hint indent">Así revisas el resultado antes de liberar el espacio. Si lo desactivas, los originales se borran en cuanto se verifica la copia.</p>
+      </details>
+    </section>
+
+    <!-- 3. Analizar / compactar -->
+    <section class="card" id="action-card">
+      <h2><span class="step">3</span> Analizar y compactar</h2>
+      <button id="analyze" class="btn primary" disabled>Analizar carpetas</button>
+      <div id="analysis" hidden>
+        <div class="big" id="saving"></div>
+        <ul class="facts" id="facts"></ul>
+        <div class="actions">
+          <button id="preview-btn" class="btn secondary">Ver ejemplo antes/después</button>
+          <button id="run" class="btn primary"></button>
+        </div>
+      </div>
+      <div id="progress" hidden>
+        <div class="bar"><div id="bar-fill"></div></div>
+        <div class="prog-line"><span id="prog-count"></span><span id="prog-eta"></span></div>
+        <div class="prog-file" id="prog-file"></div>
+        <div class="big small" id="prog-saved"></div>
+        <p class="hint">Mantén Compacta abierta y la pantalla encendida. Si la cierras, lo que ya terminó queda guardado.</p>
+        <div class="actions">
+          <button id="pause" class="btn secondary">Pausar</button>
+          <button id="stop" class="btn danger">Detener</button>
+        </div>
+      </div>
+      <div id="done" hidden>
+        <div class="big" id="done-title"></div>
+        <ul class="facts" id="done-facts"></ul>
+        <details id="errors" hidden><summary></summary><ul id="error-list" class="errlist"></ul></details>
+      </div>
+    </section>
+
+    <!-- Papelera -->
+    <section class="card" id="trash-card" hidden>
+      <h2>Papelera de Compacta</h2>
+      <p class="hint">Los originales siguen aquí hasta que vacíes la papelera. La galería no los muestra.</p>
+      <ul id="trash-list" class="roots"></ul>
+    </section>
+
+    <p class="foot">Todo se procesa en tu celular: ninguna foto se sube a internet.</p>
+  </main>
+
+  <dialog id="preview">
+    <div class="pv-head">
+      <strong id="pv-name"></strong>
+      <button class="icon" id="pv-close" aria-label="Cerrar">✕</button>
+    </div>
+    <div class="pv-stage" id="pv-stage">
+      <div class="pv-wrap" id="pv-wrap">
+        <img id="pv-after" alt="Compactada">
+        <div class="pv-before" id="pv-before-clip"><img id="pv-before" alt="Original"></div>
+        <div class="pv-divider" id="pv-divider"></div>
+        <span class="pv-lbl l">Original</span><span class="pv-lbl r">Compactada</span>
+      </div>
+    </div>
+    <input type="range" id="pv-slider" min="0" max="100" value="50" aria-label="Comparar">
+    <div class="pv-foot">
+      <span id="pv-sizes"></span>
+      <span class="pv-btns">
+        <button class="btn secondary sm" id="pv-zoom">Ver al 100 %</button>
+        <button class="btn secondary sm" id="pv-next">Otra foto</button>
+      </span>
+    </div>
+  </dialog>
+
+  <dialog id="confirm">
+    <p id="confirm-text"></p>
+    <div class="actions">
+      <button class="btn secondary" value="no" id="confirm-no">Cancelar</button>
+      <button class="btn primary" value="yes" id="confirm-yes">Sí, continuar</button>
+    </div>
+  </dialog>
+</body>
+</html>
