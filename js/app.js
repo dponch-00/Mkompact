@@ -124,7 +124,7 @@ function renderRoots() {
 $('add-root').onclick = async () => {
   let handle;
   try {
-    handle = await window.showDirectoryPicker({ mode: 'readwrite', id: 'compacta', startIn: 'pictures' });
+    handle = await window.showDirectoryPicker({ mode: 'readwrite', id: 'mkompact', startIn: 'pictures' });
   } catch (e) { if (e.name !== 'AbortError') alert('No se pudo abrir la carpeta: ' + e.message); return; }
   for (const r of state.roots) if (await r.handle.isSameEntry(handle)) return;
   const r = { id: crypto.randomUUID(), name: handle.name, handle };
@@ -240,7 +240,7 @@ async function estimateVideos(videos, level) {
   return videos.reduce((n, v) => n + Math.min(v.size, planVideo(v.meta, level, hevc).estimated), 0);
 }
 
-// Compacta de verdad unas cuantas fotos (sin guardarlas) para estimar el ahorro y para la vista previa.
+// MKompact de verdad unas cuantas fotos (sin guardarlas) para estimar el ahorro y para la vista previa.
 // Se guarda la promesa: si la vista previa la pide mientras se calcula, no se repite el trabajo.
 function calibrate(photos, level) {
   return (state.calib[level] ??= calibrateNow(photos, level));
@@ -300,7 +300,9 @@ $('pv-zoom').onclick = () => {
 };
 
 // ---------- Confirmación ----------
-function confirmDialog(text) {
+function confirmDialog(text, title = '', fatal = false) {
+  $('confirm-title').textContent = title;
+  $('confirm-title').classList.toggle('fatal', fatal);
   $('confirm-text').textContent = text;
   const d = $('confirm');
   d.showModal();
@@ -317,8 +319,9 @@ $('run').onclick = async () => {
   const { photos, videos } = selection(o);
   const n = photos.length + videos.length;
   const ok = await confirmDialog(o.trash
-    ? `Se van a compactar ${nf.format(n)} archivos.\n\nLos originales se guardan en la papelera de Compacta: podrás revisar el resultado y restaurarlos. El espacio se libera cuando vacíes la papelera.`
-    : `Se van a compactar ${nf.format(n)} archivos.\n\n⚠️ Los originales se BORRARÁN en cuanto se verifique cada copia. No se podrán recuperar.`);
+    ? `Se van a compactar ${nf.format(n)} archivos.\n\nLos originales se guardan en la papelera de MKompact: podrás revisar el resultado y restaurarlos. El espacio se libera cuando vacíes la papelera.`
+    : `Se van a compactar ${nf.format(n)} archivos.\n\n⚠️ Los originales se BORRARÁN en cuanto se verifique cada copia. No se podrán recuperar.`,
+    'Round 1', !o.trash);
   if (ok) process(photos, videos, o);
 };
 $('pause').onclick = () => {
@@ -329,6 +332,16 @@ $('pause').onclick = () => {
 $('stop').onclick = () => { state.stopped = true; state.paused = false; resumeWaiters.splice(0).forEach(f => f()); state.cancelVideo?.(); };
 const resumeWaiters = [];
 const waitIfPaused = () => state.paused ? new Promise(r => resumeWaiters.push(r)) : null;
+
+// Anuncio de inicio: dura ~1 s y no bloquea nada (pointer-events: none).
+function fight() {
+  const f = $('fight');
+  f.classList.remove('show');
+  void f.offsetWidth; // reinicia la animación si se vuelve a pelear
+  f.classList.add('show');
+  clearTimeout(fight.t);
+  fight.t = setTimeout(() => f.classList.remove('show'), 1200);
+}
 
 let wakeLock = null;
 async function keepAwake(on) {
@@ -346,6 +359,7 @@ async function process(photos, videos, o) {
   $('analysis').hidden = true; $('done').hidden = true; $('progress').hidden = false;
   $('analyze').disabled = true; $('add-root').disabled = true;
   $('pause').textContent = 'Pausar';
+  fight();
   await keepAwake(true);
 
   const total = photos.length + videos.length;
@@ -410,7 +424,8 @@ async function process(photos, videos, o) {
   Object.assign(state, { running: false });
   $('progress').hidden = true; $('done').hidden = false;
   $('analyze').disabled = false; $('add-root').disabled = false;
-  $('done-title').innerHTML = `${state.stopped ? 'Detenido' : 'Listo'}: ahorraste ${fmtBytes(r.saved)}<small>${o.trash ? 'Vacía la papelera de Compacta (abajo) para liberar el espacio.' : 'El espacio ya quedó libre.'}</small>`;
+  const banner = state.stopped ? ['Ronda detenida', ' lost'] : r.errors.length ? ['Victory', ''] : ['Flawless victory', ''];
+  $('done-title').innerHTML = `<span class="victory${banner[1]}">${banner[0]}</span>Ahorraste ${fmtBytes(r.saved)}<small>${o.trash ? 'Vacía la papelera de MKompact (abajo) para liberar el espacio.' : 'El espacio ya quedó libre.'}</small>`;
   const facts = [`<b>${nf.format(r.done - r.skipped - r.errors.length)}</b> archivos compactados`];
   if (r.skipped) facts.push(`${nf.format(r.skipped)} se dejaron igual porque no bajaban al menos ${MIN_SAVING * 100} %`);
   if (state.stopped && r.done < total) facts.push(`${nf.format(total - r.done)} quedaron pendientes`);
@@ -470,7 +485,7 @@ async function renderTrash() {
     const emptyBtn = Object.assign(document.createElement('button'), { className: 'btn danger', textContent: 'Vaciar' });
     restoreBtn.onclick = async () => {
       const recs = await store.byIndex('trash', 'root', r.id);
-      if (!await confirmDialog(`¿Regresar ${nf.format(recs.length)} originales a su lugar? Se quitarán sus versiones compactas.`)) return;
+      if (!await confirmDialog(`¿Regresar ${nf.format(recs.length)} originales a su lugar? Se quitarán sus versiones compactas.`, 'Restaurar')) return;
       restoreBtn.disabled = emptyBtn.disabled = true;
       let fails = 0;
       for (const rec of recs) {
@@ -484,7 +499,7 @@ async function renderTrash() {
       invalidate(); renderTrash();
     };
     emptyBtn.onclick = async () => {
-      if (!await confirmDialog(`¿Borrar definitivamente ${fmtBytes(size)} de originales de "${r.name}"?\n\nYa no podrás restaurarlos.`)) return;
+      if (!await confirmDialog(`¿Borrar definitivamente ${fmtBytes(size)} de originales de "${r.name}"?\n\nYa no podrás restaurarlos.`, 'Fatality', true)) return;
       restoreBtn.disabled = emptyBtn.disabled = true;
       await emptyTrash(r.handle);
       for (const rec of await store.byIndex('trash', 'root', r.id)) await store.del('trash', rec.id);
@@ -505,4 +520,4 @@ if (!('showDirectoryPicker' in window) && !new URLSearchParams(location.search).
 await loadPrefs();
 await loadRoots();
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js');
-window.__compacta = { state, analyze, selection, readOpts }; // para pruebas
+window.__mkompact = { state, analyze, selection, readOpts }; // para pruebas

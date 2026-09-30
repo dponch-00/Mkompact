@@ -1,5 +1,5 @@
 // IndexedDB mínimo: carpetas autorizadas, papelera y archivos que no conviene volver a intentar.
-const DB = 'compacta', VERSION = 1;
+const DB = 'mkompact', VERSION = 1;
 let dbp;
 
 function db() {

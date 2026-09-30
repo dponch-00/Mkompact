@@ -150,7 +150,7 @@ export async function injectLocation(handle, extra) {
 
 export async function convertVideo(file, plan, codec, writable, onProgress, registerCancel) {
   // Debe asignarse antes de crear el Output: ahí se construye el muxer que lee la fecha.
-  globalThis.__compactaCreationTime = (await readCreationTime(file)) ?? file.lastModified;
+  globalThis.__mkompactCreationTime = (await readCreationTime(file)) ?? file.lastModified;
   const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
   try {
     const output = new Output({
@@ -179,7 +179,7 @@ export async function convertVideo(file, plan, codec, writable, onProgress, regi
     registerCancel?.(() => conversion.cancel());
     await conversion.execute();
   } finally {
-    delete globalThis.__compactaCreationTime;
+    delete globalThis.__mkompactCreationTime;
     input.dispose?.();
   }
 }

@@ -4,7 +4,7 @@ import os, subprocess, sys
 from PIL import Image, ImageOps, ImageChops, ImageStat
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'out')
-TRASH = os.path.join(OUT, '.compacta-papelera')
+TRASH = os.path.join(OUT, '.mkompact-papelera')
 fails = 0
 
 
@@ -31,7 +31,7 @@ for rel in ['IMG_rotada.jpg', 'sub/PXL_sub.jpg', 'sin_exif.jpg', 'SAMSUNG_normal
     check(ne.get_ifd(0x8825) == oe.get_ifd(0x8825), 'GPS igual al original')
     dto = ne.get_ifd(0x8769).get(0x9003)
     check(bool(dto) and (oe.get_ifd(0x8769).get(0x9003) in (None, dto)), f'fecha de captura = {dto}')
-    check(bool(new.info.get('comment', b'').startswith(b'Compacta/1')), 'marca Compacta')
+    check(bool(new.info.get('comment', b'').startswith(b'MKompact/1')), 'marca MKompact')
     # Comparación visual: el original girado según EXIF debe verse igual que la versión nueva.
     upright = ImageOps.exif_transpose(orig).convert('RGB')
     check(abs(upright.width / upright.height - new.width / new.height) < 0.01,
@@ -59,7 +59,7 @@ for rel, orig_rel in [('VID_2021.mp4', 'VID_2021.mp4'), ('sub/VID_rot.mp4', 'sub
     check(get(n, 'TAG:creation_time') == get(o, 'TAG:creation_time'), f"fecha = {get(n, 'TAG:creation_time')}")
     check(abs(float(get(n, 'duration')) - float(get(o, 'duration'))) < 0.2, f"duración = {get(n, 'duration')}")
     check(('codec_type=audio' in n) == ('codec_type=audio' in o), 'audio conservado')
-    check((get(n, 'TAG:comment') or '').startswith('Compacta/1'), 'marca Compacta')
+    check((get(n, 'TAG:comment') or '').startswith('MKompact/1'), 'marca MKompact')
     dec = subprocess.run(['ffmpeg', '-v', 'error', '-i', new_p, '-f', 'null', '-'], capture_output=True, text=True)
     check(dec.returncode == 0 and not dec.stderr.strip(), 'se decodifica completo sin errores')
 

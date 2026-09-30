@@ -1,7 +1,7 @@
 // Lectura y escritura de metadatos JPEG sin dependencias.
 // Se usa en el hilo principal (análisis) y en el worker (armado del archivo final).
 
-export const MARK = 'Compacta/1';
+export const MARK = 'MKompact/1';
 
 const SOF = new Set([0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF]);
 const ascii = (u8, start, len) => String.fromCharCode(...u8.subarray(start, start + len));
@@ -21,7 +21,7 @@ export function parseJpegHeader(u8) {
     special: false,      // retrato con profundidad editable (GDepth / Container de Google)
     pano: false,         // foto 360° (GPano)
     hdr: false,          // Ultra HDR (gain map)
-    compacted: false,    // ya pasó por Compacta
+    compacted: false,    // ya pasó por MKompact
   };
   if (!info.isJpeg) return info;
   let p = 2;

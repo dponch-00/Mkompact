@@ -1,8 +1,8 @@
 // Operaciones sobre carpetas del celular (File System Access API).
 import { readJpegInfo } from './jpeg.js';
 
-export const TRASH = '.compacta-papelera';
-const TMP = '.compacta-tmp';
+export const TRASH = '.mkompact-papelera';
+const TMP = '.mkompact-tmp';
 
 const PHOTO = /\.(jpe?g)$/i, PNG = /\.png$/i, HEIC = /\.(heic|heif)$/i, VIDEO = /\.(mp4|mov|m4v|3gp)$/i;
 
@@ -55,7 +55,7 @@ export async function scan(root, onProgress, signal) {
 }
 
 // Si una sesión anterior se interrumpió a medio reemplazo, deja todo en un estado sano.
-// El temporal se llama como el ORIGINAL (".foto.png.compacta-tmp"), así se sabe si el original sigue ahí.
+// El temporal se llama como el ORIGINAL (".foto.png.mkompact-tmp"), así se sabe si el original sigue ahí.
 async function recoverTmp(dir, tmpName) {
   const origName = tmpName.slice(1, -TMP.length);
   const exists = await dir.getFileHandle(origName).then(() => true, () => false);

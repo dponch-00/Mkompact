@@ -47,7 +47,7 @@ const cases = {
 };
 for (const [name, exif] of Object.entries(cases)) {
   const fixed = patchExif(ensureDateTaken(exif, MS), 640, 480);
-  const jpg = assembleJpeg(plain, fixed, 'Compacta/1 prueba');
+  const jpg = assembleJpeg(plain, fixed, 'MKompact/1 prueba');
   writeFileSync(new URL(`${name}.jpg`, dir), jpg);
   const info = parseJpegHeader(jpg);
   console.log(name, 'make=', info.make, 'orient=', info.orientation, 'bytes', exif.length, '->', fixed.length);

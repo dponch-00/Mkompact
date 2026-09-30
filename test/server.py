@@ -1,4 +1,4 @@
-# Servidor local de Compacta.
+# Servidor local de MKompact.
 #   python test/server.py [puerto] [--open]
 # Sirve el proyecto (los módulos JS no funcionan desde file://) y acepta PUT en /test/out/...
 # para revisar resultados de las pruebas con PIL/ffprobe. Solo escucha en 127.0.0.1.
@@ -51,7 +51,7 @@ class H(http.server.SimpleHTTPRequestHandler):
 
 server = http.server.ThreadingHTTPServer(('127.0.0.1', PORT), H)
 url = f'http://localhost:{PORT}/'
-print(f'Compacta lista en {url}  (cierra esta ventana para detenerla)')
+print(f'MKompact lista en {url}  (cierra esta ventana para detenerla)')
 if '--open' in sys.argv:
     threading.Timer(0.5, lambda: webbrowser.open(url)).start()
 server.serve_forever()

@@ -1,4 +1,4 @@
-# Compacta
+# MKompact
 
 PWA para liberar espacio en el celular **compactando fotos y videos en su lugar**: cada archivo se
 reemplaza por una versión más ligera que se ve igual en la pantalla del teléfono. Todo se procesa en el
@@ -19,11 +19,11 @@ dispositivo; nada se sube a internet.
   pero sin `DateTimeOriginal`) se les escribe la fecha del archivo, para que la galería no las muestre
   como tomadas "hoy". Nunca reemplaza un video si la conversión perdería el audio o la imagen.
 - **Seguro**: escribe la copia en un temporal oculto, la verifica (se decodifica, tamaño, duración) y solo
-  entonces mueve el original a `.compacta-papelera/` (con `.nomedia`, la galería no lo ve). Desde la app
+  entonces mueve el original a `.mkompact-papelera/` (con `.nomedia`, la galería no lo ve). Desde la app
   se puede **restaurar** o **vaciar** la papelera.
 - Antes de empezar, compacta de prueba unas fotos para **estimar el ahorro** y mostrar una **comparación
   antes/después** con zoom al 100 %.
-- Se salta lo que no baje al menos 20 %, lo que ya pasó por Compacta (marca `Compacta/1` en el JPEG / tag
+- Se salta lo que no baje al menos 20 %, lo que ya pasó por MKompact (marca `MKompact/1` en el JPEG / tag
   de comentario en el MP4) y las fotos 360°. Las fotos en movimiento y los retratos con desenfoque
   editable se dejan igual, salvo que se elija compactarlas como foto fija.
 
@@ -42,13 +42,24 @@ dispositivo; nada se sube a internet.
 - La fecha de *modificación* del archivo cambia (la API no permite fijarla); la galería usa la fecha del
   EXIF / `mvhd`, que sí se conserva.
 - Ubicación GPS de los **videos**: Mediabunny no lee `©xyz` y copia mal `loci` (queda en 0,0), así que
-  Compacta quita esos tags de la conversión y copia las cajas originales tal cual a `moov/udta` al final.
+  MKompact quita esos tags de la conversión y copia las cajas originales tal cual a `moov/udta` al final.
   Probado con ambos formatos; los videos de iPhone (`com.apple.quicktime.location`) no están cubiertos.
+
+## Diseño
+
+Tema "torneo" inspirado en los juegos de pelea clásicos: piedra oscura, oro envejecido, rojo sangre y
+fuego, con guiños como *FIGHT!*, *FLAWLESS VICTORY* y *FATALITY*. Todo es original: no usa logotipos,
+personajes ni tipografías de ninguna franquicia.
+
+- Tipografías (incluidas en `fonts/`, licencia SIL OFL 1.1): **Cinzel** para títulos y **Barlow Semi
+  Condensed** para el texto.
+- Ícono: medallón con cuatro puntas hacia el centro (`icons/icon.svg`); los PNG se generan con
+  `python icons/make_icons.py`.
 
 ## Estructura
 
 ```
-index.html, css/app.css, manifest.webmanifest, sw.js, icons/
+index.html, css/app.css, manifest.webmanifest, sw.js, icons/, fonts/
 js/app.js           UI, análisis, cola de trabajo, papelera
 js/fsops.js         recorrido de carpetas, reemplazo seguro, papelera, recuperación de temporales
 js/jpeg.js          lectura/escritura de segmentos JPEG y EXIF (sin dependencias)
@@ -61,7 +72,7 @@ test/               servidor y página de pruebas (los fixtures se generan local
 
 ## Usarla en la PC
 
-Doble clic en **`Iniciar Compacta.bat`**: levanta un servidor local y abre `http://localhost:8765/`.
+Doble clic en **`Iniciar MKompact.bat`**: levanta un servidor local y abre `http://localhost:8765/`.
 Abrir `index.html` directo (doble clic) **no funciona**: Chrome no carga módulos ni workers desde `file://`.
 
 ## Desarrollo y pruebas
