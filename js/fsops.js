@@ -73,20 +73,23 @@ export async function listCandidates(root, onDir, signal) {
 // se reutiliza el resultado guardado sin volver a leer el contenido.
 export async function inspect(c, cached, wantVideo) {
   const file = await c.handle.getFile();
-  const same = cached && cached.v === RECORD_V && cached.size === file.size && cached.mtime === file.lastModified;
+  const same = cached && cached.size === file.size && cached.mtime === file.lastModified;
   const info = {
     v: RECORD_V, path: c.path, name: c.name, type: c.type, size: file.size, mtime: file.lastModified,
     taken: dateFromName(c.name) || file.lastModified,
   };
+  // Registro de una versión anterior sin fecha: se completa con la del nombre/archivo y se guarda,
+  // sin volver a leer la foto (re-leer miles de fotos en Android es lo lento).
+  const upgraded = same && !cached.taken;
   if (c.type === 'photo') {
-    if (same && 'compacted' in cached) return { file, info: { ...cached, ...info, taken: cached.taken }, fresh: false };
+    if (same && 'compacted' in cached) return { file, info: { ...cached, ...info, taken: cached.taken || info.taken }, fresh: upgraded };
     const head = await readJpegInfo(file);
     if (!head.isJpeg) return { file, info: null, fresh: true };
     const { motion, special, pano, hdr, compacted } = head;
     return { file, info: { ...info, motion, special, pano, hdr, compacted, taken: head.taken || info.taken }, fresh: true };
   }
   if (c.type === 'video') {
-    if (same && (cached.meta !== undefined || !wantVideo)) return { file, info: { ...cached, ...info, taken: cached.taken }, fresh: false };
+    if (same && (cached.meta !== undefined || !wantVideo)) return { file, info: { ...cached, ...info, taken: cached.taken || cached.meta?.created || info.taken }, fresh: upgraded };
     if (!wantVideo) return { file, info, fresh: !same };
     const meta = await quickProbe(file).catch(() => null);
     return { file, info: { ...info, meta, taken: meta?.created || info.taken }, fresh: true };

@@ -1,6 +1,7 @@
 import { store, dbEvents } from './store.js';
 import {
   ensurePermission, listCandidates, inspect, getDirPath, replaceFile, restore, emptyTrash, trashSize, TRASH, RECORD_V, typeOf,
+  dateFromName,
 } from './fsops.js';
 import { $, nf, fmtBytes, fmtTime, esc, li } from './util.js';
 import { createThumbs } from './thumbs.js';
@@ -207,7 +208,11 @@ const record = (root, info) => ({
   ...('meta' in info ? { meta: info.meta } : {}),
 });
 // fk = clave del archivo; key = clave para recordar los que "no se pudieron reducir" (cambia si el archivo cambia)
-const toItem = (root, rec) => ({ ...rec, root, fk: rec.key, key: `${root.id}|${rec.path}/${rec.name}|${rec.size}|${rec.mtime}` });
+// Los análisis hechos con versiones anteriores no guardaban la fecha: se toma del nombre o del archivo.
+const toItem = (root, rec) => ({
+  ...rec, root, fk: rec.key, key: `${root.id}|${rec.path}/${rec.name}|${rec.size}|${rec.mtime}`,
+  taken: rec.taken || dateFromName(rec.name) || rec.mtime || 0,
+});
 
 async function mapPool(list, n, fn) {
   let i = 0;

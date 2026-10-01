@@ -64,6 +64,7 @@ export function createGallery(api) {
       className: 'chip' + (g.filter === k ? ' on' : ''), textContent: `${label} · ${nf.format(counts[k])}`,
       onclick: () => { g.filter = k; exitSelection(false); render(); },
     })));
+    $('g-status').querySelector('.on')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     for (const b of $('g-type').querySelectorAll('.chip')) b.classList.toggle('on', b.dataset.type === g.type);
   }
   $('g-type').onclick = e => {
@@ -80,8 +81,9 @@ export function createGallery(api) {
     }[g.filter];
     const out = api.items().filter(it =>
       (g.type === 'all' || (g.type === 'video' ? it.type === 'video' : it.type !== 'video')) && pred(api.flags(it)));
+    const t = it => it.taken || 0;
     const cmp = {
-      new: (a, b) => b.taken - a.taken, old: (a, b) => a.taken - b.taken, big: (a, b) => b.size - a.size,
+      new: (a, b) => t(b) - t(a), old: (a, b) => t(a) - t(b), big: (a, b) => b.size - a.size,
     }[g.sort];
     return out.sort(cmp);
   }
@@ -102,10 +104,11 @@ export function createGallery(api) {
     let group = null, groupKey = null;
     g.list.forEach((it, i) => {
       const d = new Date(it.taken);
-      const key = g.sort === 'big' ? 'all' : `${d.getFullYear()}-${d.getMonth()}`;
+      const valid = !Number.isNaN(d.getTime()) && it.taken > 0;
+      const key = g.sort === 'big' ? 'all' : valid ? `${d.getFullYear()}-${d.getMonth()}` : 'none';
       if (key !== groupKey) {
         groupKey = key;
-        const month = MONTH.format(d);
+        const month = valid ? MONTH.format(d) : 'sin fecha';
         const label = g.sort === 'big' ? 'Más pesados primero' : month.charAt(0).toUpperCase() + month.slice(1);
         group = { start: i, end: i, bytes: 0, head: null, body: el('div', { className: 'g-cells' }) };
         const check = el('button', { className: 'g-check', title: 'Seleccionar todo el grupo' });
@@ -337,7 +340,7 @@ export function createGallery(api) {
       const where = [it.root.name, it.path].filter(Boolean).join('/');
       const state = f.protected ? '🛡 Protegida' : f.inTrash ? '↺ Compactada · el original está en la papelera'
         : f.compacted ? '✓ Compactada' : f.pending ? 'Por compactar' : (REASONS[f.reason] || 'Se deja igual');
-      $('v-info').innerHTML = `${esc(fmtDate(it.taken))} · ${esc(where)}<br>${esc(state)}`;
+      $('v-info').innerHTML = `${esc(it.taken ? fmtDate(it.taken) : 'Sin fecha')} · ${esc(where)}<br>${esc(state)}`;
       stage.replaceChildren(el('div', { className: 'v-loading', textContent: 'Cargando…' }));
       $('v-compare').hidden = true;
       for (const [id, on] of Object.entries({

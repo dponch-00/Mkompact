@@ -1,5 +1,5 @@
 // Cache de la app para que funcione sin internet. Subir VERSION en cada publicación.
-const VERSION = 'mkompact-v7';
+const VERSION = 'mkompact-v8';
 const FILES = [
   './', 'index.html', 'css/app.css', 'manifest.webmanifest',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png',
