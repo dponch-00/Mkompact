@@ -1,5 +1,5 @@
 // Cache de la app para que funcione sin internet. Subir VERSION en cada publicación.
-const VERSION = 'mkompact-v5';
+const VERSION = 'mkompact-v6';
 const FILES = [
   './', 'index.html', 'css/app.css', 'manifest.webmanifest',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png',
@@ -21,10 +21,17 @@ self.addEventListener('install', e => {
 self.addEventListener('activate', e => {
   e.waitUntil(dropAll(VERSION).then(() => self.clients.claim()));
 });
-// "Reinstalar limpio" desde Opciones: borra todo lo guardado y lo vuelve a bajar de la red.
 self.addEventListener('message', e => {
-  if (e.data !== 'reinstall') return;
-  e.waitUntil(dropAll(null).then(fill).then(() => e.source?.postMessage('reinstalled')));
+  // "Reinstalar limpio" desde Opciones: borra todo lo guardado y lo vuelve a bajar de la red.
+  if (e.data === 'reinstall') {
+    e.waitUntil(dropAll(null).then(fill).then(() => e.source?.postMessage('reinstalled')));
+  }
+  // Otra ventana con una versión anterior bloquea la base de datos: se recargan las demás ventanas
+  // (así cargan la versión nueva y la sueltan).
+  if (e.data === 'reload-others') {
+    e.waitUntil(self.clients.matchAll({ type: 'window' }).then(list => Promise.all(
+      list.filter(c => c.id !== e.source?.id).map(c => c.navigate(c.url).catch(() => {})))));
+  }
 });
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;

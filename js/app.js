@@ -1,4 +1,4 @@
-import { store } from './store.js';
+import { store, dbEvents } from './store.js';
 import {
   ensurePermission, listCandidates, inspect, getDirPath, replaceFile, restore, emptyTrash, trashSize, TRASH, RECORD_V, typeOf,
 } from './fsops.js';
@@ -998,6 +998,15 @@ async function startServiceWorker() {
   });
   await navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {});
 }
+
+// ---------- Base de datos compartida con otras ventanas ----------
+dbEvents.blocked = on => { $('db-blocked').hidden = !on; };
+dbEvents.versionchange = () => { $('update-banner').hidden = false; };
+$('db-close-others').onclick = () => {
+  const sw = navigator.serviceWorker?.controller;
+  if (sw) sw.postMessage('reload-others');
+  else alert('Cierra las otras pestañas o ventanas de MKompact y vuelve a abrir esta.');
+};
 
 // ---------- Inicio ----------
 if (!('showDirectoryPicker' in window) && !new URLSearchParams(location.search).has('opfs')) {

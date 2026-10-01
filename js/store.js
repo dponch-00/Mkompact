@@ -3,6 +3,11 @@
 const DB = 'mkompact', VERSION = 3;
 let dbp;
 
+// Avisos para la interfaz:
+//  blocked(true/false): otra ventana con una versión anterior tiene la base abierta y no deja actualizarla
+//  versionchange(): una versión más nueva necesita la base; esta ventana la suelta y debe recargarse
+export const dbEvents = { blocked: null, versionchange: null };
+
 function db() {
   dbp ??= new Promise((res, rej) => {
     const r = indexedDB.open(DB, VERSION);
@@ -23,7 +28,13 @@ function db() {
         d.createObjectStore('thumbs');  // clave = fileKey|tamaño|fecha -> { blob, orient }
       }
     };
-    r.onsuccess = () => res(r.result);
+    r.onblocked = () => dbEvents.blocked?.(true);
+    r.onsuccess = () => {
+      dbEvents.blocked?.(false);
+      const d = r.result;
+      d.onversionchange = () => { d.close(); dbp = null; dbEvents.versionchange?.(); };
+      res(d);
+    };
     r.onerror = () => rej(r.error);
   });
   return dbp;
