@@ -29,13 +29,17 @@ function db() {
       }
     };
     r.onblocked = () => dbEvents.blocked?.(true);
+    // Si la ventana vieja está congelada en segundo plano, Chrome ni siquiera avisa "blocked":
+    // se espera para siempre. Si en 2.5 s no abrió, se avisa igual.
+    const slow = setTimeout(() => dbEvents.blocked?.(true), 2500);
     r.onsuccess = () => {
+      clearTimeout(slow);
       dbEvents.blocked?.(false);
       const d = r.result;
       d.onversionchange = () => { d.close(); dbp = null; dbEvents.versionchange?.(); };
       res(d);
     };
-    r.onerror = () => rej(r.error);
+    r.onerror = () => { clearTimeout(slow); rej(r.error); };
   });
   return dbp;
 }
