@@ -1,16 +1,23 @@
-// IndexedDB mínimo: carpetas autorizadas, papelera y archivos que no conviene volver a intentar.
-const DB = 'mkompact', VERSION = 1;
+// IndexedDB mínimo: carpetas autorizadas, papelera, archivos que no conviene volver a intentar
+// y el resultado del análisis de cada archivo (para no perder el avance si se recarga la app).
+const DB = 'mkompact', VERSION = 2;
 let dbp;
 
 function db() {
   dbp ??= new Promise((res, rej) => {
     const r = indexedDB.open(DB, VERSION);
-    r.onupgradeneeded = () => {
+    r.onupgradeneeded = e => {
       const d = r.result;
-      d.createObjectStore('roots', { keyPath: 'id' });
-      d.createObjectStore('trash', { keyPath: 'id', autoIncrement: true }).createIndex('root', 'rootId');
-      d.createObjectStore('skip');
-      d.createObjectStore('prefs');
+      if (e.oldVersion < 1) {
+        d.createObjectStore('roots', { keyPath: 'id' });
+        d.createObjectStore('trash', { keyPath: 'id', autoIncrement: true }).createIndex('root', 'rootId');
+        d.createObjectStore('skip');
+        d.createObjectStore('prefs');
+      }
+      if (e.oldVersion < 2) {
+        // key = `${rootId}|${path}|${name}`
+        d.createObjectStore('files', { keyPath: 'key' }).createIndex('root', 'rootId');
+      }
     };
     r.onsuccess = () => res(r.result);
     r.onerror = () => rej(r.error);
@@ -27,6 +34,7 @@ async function tx(store, mode, fn) {
     Promise.resolve(fn(s)).then(v => { out = v; });
     t.oncomplete = () => res(out);
     t.onerror = () => rej(t.error);
+    t.onabort = () => rej(t.error);
   });
 }
 const req = r => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
@@ -37,5 +45,9 @@ export const store = {
   put: (name, value, key) => tx(name, 'readwrite', s => req(key === undefined ? s.put(value) : s.put(value, key))),
   del: (name, key) => tx(name, 'readwrite', s => req(s.delete(key))),
   byIndex: (name, index, key) => tx(name, 'readonly', s => req(s.index(index).getAll(key))),
+  keysByIndex: (name, index, key) => tx(name, 'readonly', s => req(s.index(index).getAllKeys(key))),
   keys: name => tx(name, 'readonly', s => req(s.getAllKeys())),
+  // Varias escrituras en una sola transacción (mucho más rápido que una por una).
+  putMany: (name, values) => tx(name, 'readwrite', s => { for (const v of values) s.put(v); }),
+  delMany: (name, keys) => tx(name, 'readwrite', s => { for (const k of keys) s.delete(k); }),
 };

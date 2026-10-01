@@ -21,6 +21,11 @@ dispositivo; nada se sube a internet.
 - **Seguro**: escribe la copia en un temporal oculto, la verifica (se decodifica, tamaño, duración) y solo
   entonces mueve el original a `.mkompact-papelera/` (con `.nomedia`, la galería no lo ve). Desde la app
   se puede **restaurar** o **vaciar** la papelera.
+- **Análisis que no se pierde**: primero lista las carpetas y luego revisa los archivos (6 a la vez) con
+  barra de progreso y tiempo restante. Cada resultado se guarda en IndexedDB mientras avanza: si la app se
+  recarga o se cierra, al volver continúa donde se quedó, y un análisis terminado aparece al instante.
+  Los videos solo se miden si se activan, leyendo únicamente su índice (`moov`). Se bloquea el gesto de
+  "jalar para recargar" y se pide confirmación antes de salir a media tarea.
 - Antes de empezar, compacta de prueba unas fotos para **estimar el ahorro** y mostrar una **comparación
   antes/después** con zoom al 100 %.
 - Se salta lo que no baje al menos 20 %, lo que ya pasó por MKompact (marca `MKompact/1` en el JPEG / tag
@@ -34,6 +39,14 @@ dispositivo; nada se sube a internet.
 - Android no deja elegir la raíz del almacenamiento, `Android/data` ni la raíz de `Download`: se eligen
   carpetas como `DCIM/Camera`, `Pictures` o `WhatsApp/Media`.
 - No trabaja en segundo plano: la pantalla debe quedarse encendida (la app pide *wake lock*).
+
+## Actualizaciones
+
+En **Opciones → Actualizaciones**, *Buscar actualizaciones* compara la versión instalada con la publicada
+(`VERSION` en `sw.js`). Si hay una nueva, el service worker nuevo la descarga saltándose la caché del
+navegador y la app se recarga; si no, *Reinstalar limpio* borra la copia guardada de la app y la vuelve a
+bajar. Ninguna de las dos toca IndexedDB: carpetas, papelera y análisis se conservan. Si una versión nueva
+se instala con la app abierta, aparece un aviso para recargar en vez de mezclar versiones.
 
 ## Limitaciones conocidas
 
@@ -61,11 +74,12 @@ personajes ni tipografías de ninguna franquicia.
 ```
 index.html, css/app.css, manifest.webmanifest, sw.js, icons/, fonts/
 js/app.js           UI, análisis, cola de trabajo, papelera
-js/fsops.js         recorrido de carpetas, reemplazo seguro, papelera, recuperación de temporales
+js/fsops.js         listado y revisión de archivos, reemplazo seguro, papelera, recuperación de temporales
+js/mp4.js           lectura del índice MP4 (medidas, duración, fecha, ubicación) sin Mediabunny
 js/jpeg.js          lectura/escritura de segmentos JPEG y EXIF (sin dependencias)
 js/photo-worker.js  decodifica, reduce, codifica con MozJPEG y reinyecta EXIF
-js/video.js         análisis y conversión de video, fecha de grabación
-js/store.js         IndexedDB (carpetas, papelera, preferencias)
+js/video.js         conversión y verificación de video (Mediabunny)
+js/store.js         IndexedDB (carpetas, papelera, preferencias, análisis guardado)
 vendor/             @jsquash/jpeg 1.6.0 (Apache-2.0) y mediabunny 1.61.0 (MPL-2.0, parche en PATCH.md)
 test/               servidor y página de pruebas (los fixtures se generan localmente, no van al repo)
 ```
@@ -87,4 +101,6 @@ python test/server.py 8765
 - `python test/verify.py` revisa lo exportado (EXIF, orientación, fecha y audio de videos, decodificación).
 - `node test/exif-unit.mjs && python test/exif-unit-check.py` prueba la reescritura de EXIF (LE/BE, con y
   sin directorio Exif, con y sin fecha).
+- `?lento=80` simula un celular lento (80 ms por archivo) para probar el progreso y la reanudación.
+- `?sw` activa el service worker en localhost (normalmente apagado ahí para que los cambios se vean).
 - Al publicar cambios, subir `VERSION` en `sw.js`.

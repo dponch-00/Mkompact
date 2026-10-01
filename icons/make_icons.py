@@ -1,85 +1,101 @@
-# Genera icon-192.png e icon-512.png a partir del mismo diseño que icon.svg.
+# Genera el ícono "MK" (SVG y PNG) a partir de la fuente Cinzel incluida en fonts/.
+#   python -m pip install fonttools brotli   (una sola vez)
 #   python icons/make_icons.py
-import os
-from PIL import Image, ImageDraw
+import os, tempfile
+from fontTools.ttLib import TTFont
+from fontTools.varLib.instancer import instantiateVariableFont
+from fontTools.pens.svgPathPen import SVGPathPen
+from fontTools.pens.boundsPen import BoundsPen
+from fontTools.pens.transformPen import TransformPen
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageChops
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+TEXT = 'MK'
+GOLD = [(0, '#fff3c4'), (.42, '#f0c24b'), (.75, '#b07d18'), (1, '#6e4a08')]
+GLOW = '#ff3d0a'
+OUTLINE = '#2b1a02'
+
+font = instantiateVariableFont(TTFont(os.path.join(HERE, '..', 'fonts', 'cinzel.woff2')), {'wght': 900})
+font.flavor = None
+TTF = os.path.join(tempfile.gettempdir(), 'mkompact-cinzel-900.ttf')
+font.save(TTF)
+glyphs, cmap, upm = font.getGlyphSet(), font.getBestCmap(), font['head'].unitsPerEm
+rgb = lambda h: tuple(int(h[i:i + 2], 16) for i in (1, 3, 5))
 
 
-def lerp(a, b, t):
-    return tuple(round(a[i] + (b[i] - a[i]) * t) for i in range(3))
+def layout(size, box):
+    """Letras centradas en un cuadro: (glifos, x de cada letra en unidades, escala, x izquierda, línea base)."""
+    names = [cmap[ord(c)] for c in TEXT]
+    xs, x = [], 0
+    for n in names:
+        xs.append(x)
+        x += glyphs[n].width - upm * .02  # un poco más juntas que el espaciado normal
+    bp = BoundsPen(glyphs)
+    for n, ox in zip(names, xs):
+        glyphs[n].draw(TransformPen(bp, (1, 0, 0, 1, ox, 0)))
+    x0, y0, x1, y1 = bp.bounds
+    scale = box * size / (x1 - x0)
+    left = (size - (x1 - x0) * scale) / 2 - x0 * scale
+    base = size / 2 + (y1 + y0) / 2 * scale
+    return names, xs, scale, left, base
 
 
-def hexrgb(h):
-    return tuple(int(h[i:i + 2], 16) for i in (1, 3, 5))
+def svg(path_out, size=512, box=.74):
+    names, xs, s, left, base = layout(size, box)
+    pen = SVGPathPen(glyphs)
+    for n, ox in zip(names, xs):
+        glyphs[n].draw(TransformPen(pen, (s, 0, 0, -s, left + ox * s, base)))
+    d = pen.getCommands()
+    stops = ''.join(f'<stop offset="{o}" stop-color="{c}"/>' for o, c in GOLD)
+    open(path_out, 'w', encoding='utf-8').write(f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {size} {size}">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">{stops}</linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="{size * .03:.1f}"/></filter>
+  </defs>
+  <rect width="{size}" height="{size}" rx="{size * .19:.0f}" fill="#000"/>
+  <path d="{d}" fill="{GLOW}" opacity=".55" filter="url(#glow)"/>
+  <path d="{d}" fill="url(#g)" stroke="{OUTLINE}" stroke-width="{size * .008:.1f}" paint-order="stroke"/>
+</svg>
+''')
 
 
-def gold_at(y, top, bottom):
-    t = min(1, max(0, (y - top) / (bottom - top)))
-    stops = [(0, hexrgb('#fff1b8')), (.45, hexrgb('#e0b243')), (1, hexrgb('#7a4e0e'))]
-    for (t0, c0), (t1, c1) in zip(stops, stops[1:]):
-        if t <= t1:
-            return lerp(c0, c1, (t - t0) / (t1 - t0))
-    return stops[-1][1]
-
-
-def render(size, maskable=False):
-    S = 4 * size
-    k = S / 512
-    im = Image.new('RGBA', (S, S), (0, 0, 0, 0))
-    d = ImageDraw.Draw(im)
-    bg = hexrgb('#0b0806')
-    if maskable:
-        d.rectangle([0, 0, S, S], fill=bg)
-    else:
-        d.rounded_rectangle([0, 0, S - 1, S - 1], radius=96 * k, fill=bg)
-    # Para el ícono "maskable" el emblema se reduce y queda dentro de la zona segura (círculo del 80 %).
-    s = .82 if maskable else 1
-    c = 256 * k
-    P = lambda x, y: (c + (x - 256) * k * s, c + (y - 256) * k * s)
-    # núcleo rojo con degradado radial
-    R = 196
-    for i in range(R, 0, -2):
-        t = i / R
-        col = lerp(hexrgb('#b3160e'), hexrgb('#5a0606'), min(1, t / .55)) if t < .55 else lerp(hexrgb('#5a0606'), hexrgb('#1c0202'), (t - .55) / .45)
-        x0, y0 = P(256 - i, 256 - 20 * (1 - t) - i)
-        x1, y1 = P(256 + i, 256 - 20 * (1 - t) + i)
-        d.ellipse([x0, y0, x1, y1], fill=col)
-    # anillo dorado (con degradado vertical)
-    ring = Image.new('L', (S, S), 0)
-    rd = ImageDraw.Draw(ring)
-    x0, y0 = P(256 - 208, 256 - 208); x1, y1 = P(256 + 208, 256 + 208)
-    rd.ellipse([x0, y0, x1, y1], fill=255)
-    x0, y0 = P(256 - 184, 256 - 184); x1, y1 = P(256 + 184, 256 + 184)
-    rd.ellipse([x0, y0, x1, y1], fill=0)
-    grad = Image.new('RGBA', (S, S))
-    gd = ImageDraw.Draw(grad)
-    top, bottom = P(0, 48)[1], P(0, 464)[1]
+def gold_fill(S):
+    col = Image.new('RGB', (1, S))
     for y in range(S):
-        gd.line([(0, y), (S, y)], fill=gold_at(y, top, bottom) + (255,))
-    im.paste(grad, (0, 0), ring)
-    x0, y0 = P(256 - 168, 256 - 168); x1, y1 = P(256 + 168, 256 + 168)
-    d.ellipse([x0, y0, x1, y1], outline=(224, 178, 67, 140), width=max(1, round(3 * k * s)))
-    # puntas hacia el centro + rombo
-    shapes = [
-        [(256, 214), (214, 128), (298, 128)], [(256, 298), (214, 384), (298, 384)],
-        [(214, 256), (128, 214), (128, 298)], [(298, 256), (384, 214), (384, 298)],
-        [(256, 228), (284, 256), (256, 284), (228, 256)],
-    ]
+        t = y / (S - 1)
+        for (t0, c0), (t1, c1) in zip(GOLD, GOLD[1:]):
+            if t <= t1:
+                k = (t - t0) / (t1 - t0)
+                a, b = rgb(c0), rgb(c1)
+                col.putpixel((0, y), tuple(round(a[i] + (b[i] - a[i]) * k) for i in range(3)))
+                break
+    return col.resize((S, S))
+
+
+def png(path_out, size, rounded=True, box=.74):
+    S = size * 4  # se dibuja a 4x y se reduce: bordes suaves
+    names, xs, s, left, base = layout(S, box)
+    f = ImageFont.truetype(TTF, size=round(upm * s))
     mask = Image.new('L', (S, S), 0)
     md = ImageDraw.Draw(mask)
-    for sh in shapes:
-        md.polygon([P(x, y) for x, y in sh], fill=255)
-    top, bottom = P(0, 128)[1], P(0, 384)[1]
-    grad2 = Image.new('RGBA', (S, S))
-    gd2 = ImageDraw.Draw(grad2)
-    for y in range(S):
-        gd2.line([(0, y), (S, y)], fill=gold_at(y, top, bottom) + (255,))
-    im.paste(grad2, (0, 0), mask)
-    return im.resize((size, size), Image.LANCZOS)
+    for ch, ox in zip(TEXT, xs):
+        md.text((left + ox * s, base), ch, font=f, fill=255, anchor='ls')
+    bg = Image.new('L', (S, S), 0)
+    if rounded:
+        ImageDraw.Draw(bg).rounded_rectangle([0, 0, S - 1, S - 1], radius=S * .19, fill=255)
+    else:
+        bg.paste(255, (0, 0, S, S))
+    img = Image.new('RGBA', (S, S), (0, 0, 0, 0))
+    img.paste((0, 0, 0, 255), (0, 0), bg)
+    glow = mask.filter(ImageFilter.GaussianBlur(S * .03)).point(lambda v: int(v * .55))
+    img.paste(rgb(GLOW) + (255,), (0, 0), ImageChops.multiply(glow, bg))
+    img.paste(rgb(OUTLINE) + (255,), (0, 0), mask.filter(ImageFilter.MaxFilter(max(3, int(S * .008) | 1))))
+    img.paste(gold_fill(S).convert('RGBA'), (0, 0), mask)
+    img.resize((size, size), Image.LANCZOS).save(path_out)
 
 
-render(192).save(os.path.join(HERE, 'icon-192.png'))
-render(512).save(os.path.join(HERE, 'icon-512.png'))
-render(512, maskable=True).save(os.path.join(HERE, 'icon-maskable-512.png'))
+svg(os.path.join(HERE, 'icon.svg'))
+png(os.path.join(HERE, 'icon-192.png'), 192)
+png(os.path.join(HERE, 'icon-512.png'), 512)
+png(os.path.join(HERE, 'icon-maskable-512.png'), 512, rounded=False, box=.6)  # dentro de la zona segura
 print('ok')

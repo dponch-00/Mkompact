@@ -1,5 +1,6 @@
 // Operaciones sobre carpetas del celular (File System Access API).
 import { readJpegInfo } from './jpeg.js';
+import { quickProbe } from './mp4.js';
 
 export const TRASH = '.mkompact-papelera';
 const TMP = '.mkompact-tmp';
@@ -18,11 +19,16 @@ export async function ensurePermission(handle, ask) {
   return (await handle.requestPermission(opts)) === 'granted';
 }
 
-// Recorre la carpeta y clasifica. Salta carpetas ocultas (incluida la papelera) y restos temporales.
-export async function scan(root, onProgress, signal) {
-  const items = [];
+export const typeOf = name =>
+  PHOTO.test(name) ? 'photo' : PNG.test(name) ? 'png' : VIDEO.test(name) ? 'video' : HEIC.test(name) ? 'heic' : null;
+
+// Fase 1: lista los archivos de la carpeta (sin abrirlos). Salta carpetas ocultas, incluida la papelera,
+// y recupera restos temporales de una sesión interrumpida.
+export async function listCandidates(root, onDir, signal) {
+  const found = [];
   const counts = { files: 0, heic: 0 };
   async function walk(dir, path) {
+    onDir?.(path, counts.files);
     const tmps = [];
     for await (const [name, h] of dir.entries()) {
       if (signal?.aborted) return;
@@ -32,26 +38,37 @@ export async function scan(root, onProgress, signal) {
       }
       if (h.kind === 'directory') { await walk(h, path ? `${path}/${name}` : name); continue; }
       counts.files++;
-      if (counts.files % 50 === 0) onProgress?.(counts.files);
-      let type = PHOTO.test(name) ? 'photo' : PNG.test(name) ? 'png' : VIDEO.test(name) ? 'video' : HEIC.test(name) ? 'heic' : null;
-      if (!type) continue;
-      if (type === 'heic') { counts.heic++; continue; }
-      const file = await h.getFile();
-      const item = { dir, path, name, type, size: file.size, mtime: file.lastModified, file };
-      if (type === 'photo') {
-        const head = await readJpegInfo(file);
-        if (!head.isJpeg) continue;
-        const { motion, special, pano, hdr, compacted } = head;
-        Object.assign(item, { motion, special, pano, hdr, compacted });
-      }
-      items.push(item);
+      const type = typeOf(name);
+      if (type === 'heic') counts.heic++;
+      else if (type) found.push({ dir, handle: h, path, name, type });
     }
     // Se recuperan después de recorrer: borrar o renombrar durante la iteración puede saltarse entradas.
     for (const t of tmps) await recoverTmp(dir, t).catch(() => {});
   }
   await walk(root, '');
-  onProgress?.(counts.files);
-  return { items, counts };
+  return { found, counts };
+}
+
+// Fase 2: datos de un archivo. Si ya se había revisado y no cambió (mismo tamaño y fecha),
+// se reutiliza el resultado guardado sin volver a leer el contenido.
+export async function inspect(c, cached, wantVideo) {
+  const file = await c.handle.getFile();
+  const same = cached && cached.size === file.size && cached.mtime === file.lastModified;
+  const info = { path: c.path, name: c.name, type: c.type, size: file.size, mtime: file.lastModified };
+  if (c.type === 'photo') {
+    if (same && 'compacted' in cached) return { file, info: { ...cached, ...info }, fresh: false };
+    const head = await readJpegInfo(file);
+    if (!head.isJpeg) return { file, info: null, fresh: true };
+    const { motion, special, pano, hdr, compacted } = head;
+    return { file, info: { ...info, motion, special, pano, hdr, compacted }, fresh: true };
+  }
+  if (c.type === 'video') {
+    if (same && (cached.meta !== undefined || !wantVideo)) return { file, info: { ...cached, ...info }, fresh: false };
+    if (!wantVideo) return { file, info, fresh: !same };
+    const meta = await quickProbe(file).catch(() => null);
+    return { file, info: { ...info, meta }, fresh: true };
+  }
+  return { file, info, fresh: !same }; // png
 }
 
 // Si una sesión anterior se interrumpió a medio reemplazo, deja todo en un estado sano.
@@ -63,7 +80,7 @@ async function recoverTmp(dir, tmpName) {
   else await renameFile(dir, await dir.getFileHandle(tmpName), await uniqueName(dir, targetName(origName)));
 }
 
-async function getDirPath(root, path, create) {
+export async function getDirPath(root, path, create) {
   let d = root;
   for (const part of path.split('/').filter(Boolean)) d = await d.getDirectoryHandle(part, { create });
   return d;
@@ -137,7 +154,8 @@ export async function replaceFile({ root, item, write, finalize, verify, keepOri
   }
   const finalName = newName === name ? name : await uniqueName(dir, newName);
   await renameFile(dir, tmp, finalName);
-  return { finalName, newSize, trashPath };
+  const final = await (await dir.getFileHandle(finalName)).getFile();
+  return { finalName, newSize, newMtime: final.lastModified, trashPath };
 }
 
 // Regresa el original desde la papelera y quita la versión compacta.

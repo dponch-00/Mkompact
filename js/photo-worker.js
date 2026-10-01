@@ -3,17 +3,21 @@ import encodeMozjpeg from '../vendor/jsquash-jpeg/encode.js';
 import { readJpegInfo, patchExif, ensureDateTaken, buildDateExif, assembleJpeg, MARK } from './jpeg.js';
 
 self.onmessage = async ({ data }) => {
-  const { id, file, quality, maxSide } = data;
+  const { id, file, quality, maxSide, skipSpecial } = data;
   try {
-    const result = await compress(file, quality, maxSide);
-    self.postMessage({ id, ok: true, ...result }, [result.buffer]);
+    const result = await compress(file, quality, maxSide, skipSpecial);
+    self.postMessage({ id, ok: true, ...result }, result.buffer ? [result.buffer] : []);
   } catch (err) {
     self.postMessage({ id, ok: false, error: String(err?.message || err) });
   }
 };
 
-async function compress(file, quality, maxSide) {
+async function compress(file, quality, maxSide, skipSpecial) {
   const info = await readJpegInfo(file);
+  // Se vuelve a revisar aquí por si el archivo cambió desde el análisis guardado.
+  if (info.compacted) return { ignored: 'compacted' };
+  if (info.pano) return { ignored: 'pano' };
+  if (skipSpecial && (info.motion || info.special)) return { ignored: 'motion' };
   const bmp = await decode(file, info, maxSide);
   const { width, height } = bmp;
 
