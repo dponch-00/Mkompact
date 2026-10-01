@@ -1,32 +1,77 @@
 import { store } from './store.js';
-import { ensurePermission, listCandidates, inspect, getDirPath, replaceFile, restore, emptyTrash, trashSize } from './fsops.js';
+import {
+  ensurePermission, listCandidates, inspect, getDirPath, replaceFile, restore, emptyTrash, trashSize, TRASH, RECORD_V, typeOf,
+} from './fsops.js';
+import { $, nf, fmtBytes, fmtTime, esc, li } from './util.js';
+import { createThumbs } from './thumbs.js';
+import { createNight } from './night.js';
+import { createGallery } from './gallery.js';
 
-const $ = id => document.getElementById(id);
 const LEVELS = {
   suave: { quality: 85, maxSide: 0, hint: 'Casi imperceptible. Ahorro moderado.' },
   equilibrado: { quality: 75, maxSide: 2560, hint: 'Se ve igual en el celular y en la mayoría de pantallas. Buen ahorro.' },
   maximo: { quality: 65, maxSide: 1600, hint: 'Máximo ahorro. Bien para verlas en el celular; pierde detalle al ampliar o imprimir.' },
 };
-const MIN_SAVING = 0.2;        // si no se ahorra al menos 20 %, se deja el original
-const MIN_VIDEO = 10 * 2 ** 20; // videos de menos de 10 MB no valen la pena
-
-const nf = new Intl.NumberFormat('es-MX');
-const fmtBytes = b => {
-  if (b < 1024 ** 2) return `${nf.format(Math.round(b / 1024))} KB`;
-  if (b < 1024 ** 3) return `${nf.format(Math.round(b / 1024 ** 2))} MB`;
-  return `${(b / 1024 ** 3).toLocaleString('es-MX', { maximumFractionDigits: 1 })} GB`;
-};
-const fmtTime = s => s < 60 ? `${Math.max(1, Math.round(s))} s` : s < 3600 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`;
-const li = (html) => { const e = document.createElement('li'); e.innerHTML = html; return e; };
-const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+const MIN_SAVING = 0.2;          // si no se ahorra al menos 20 %, se deja el original
+const MIN_VIDEO = 10 * 2 ** 20;  // videos de menos de 10 MB no valen la pena
+const MIN_PHOTO = 150 * 1024;    // fotos de menos de 150 KB ya son pequeñas
 
 const state = {
-  roots: [],          // { id, name, handle, ok }
-  analysis: null,     // { items, counts, skip }
-  calib: {},          // nivel -> Promise<{ ratio, samples: [{item, blob, size}] }>
-  running: false, paused: false, stopped: false, cancelVideo: null,
+  roots: [],              // { id, name, handle, ok }
+  analysis: null,         // { items, counts, skip, at }
+  calib: {},              // nivel+motor -> Promise<{ ratio, samples }>
+  protect: new Set(),     // fileKey de archivos protegidos
+  trashMap: new Map(),    // fileKey de la versión compactada -> registro de papelera
+  running: false, stopped: false, cancelVideo: null,
 };
 let renderSeq = 0; // descarta cálculos de ahorro viejos si cambian las opciones mientras tanto
+const sum = arr => arr.reduce((n, i) => n + i.size, 0);
+const fileKey = (rootId, path, name) => `${rootId}|${path}|${name}`;
+
+// ---------- Pausa (botón, o automática al salir de la app) ----------
+const gate = {
+  paused: false, auto: false, waiters: [], pausedAt: 0, pausedTotal: 0,
+  pause(auto = false) {
+    if (this.paused) return;
+    Object.assign(this, { paused: true, auto, pausedAt: performance.now() });
+    pauseUi();
+  },
+  resume() {
+    if (!this.paused) return;
+    this.pausedTotal += performance.now() - this.pausedAt;
+    Object.assign(this, { paused: false, auto: false });
+    this.waiters.splice(0).forEach(f => f());
+    pauseUi();
+  },
+  wait() { return this.paused ? new Promise(r => this.waiters.push(r)) : null; },
+  elapsed(t0) { return (performance.now() - t0 - this.pausedTotal - (this.paused ? performance.now() - this.pausedAt : 0)) / 1000; },
+  reset() { Object.assign(this, { paused: false, auto: false, pausedTotal: 0 }); this.waiters.splice(0).forEach(f => f()); },
+};
+function pauseUi() {
+  const text = !gate.paused ? '' : gate.auto
+    ? 'En pausa porque saliste de la app. Continúa sola cuando regreses.'
+    : 'En pausa.';
+  for (const id of ['pause-note', 'scan-pause-note']) { $(id).textContent = text; $(id).hidden = !gate.paused; }
+  $('pause').textContent = gate.paused ? 'Continuar' : 'Pausar';
+  $('scan-pause').textContent = gate.paused ? 'Continuar' : 'Pausar';
+}
+// Al salir de la app (cambiar de app, apagar la pantalla) se pausa en un punto seguro y se guarda
+// lo hecho; al volver continúa sola. En Modo noche la app sigue visible, así que no se pausa.
+document.addEventListener('visibilitychange', () => {
+  const busy = state.running || scanState.running;
+  if (document.visibilityState === 'hidden') {
+    scanState.flush?.();
+    saveJob();
+    if (busy && !gate.paused) gate.pause(true);
+  } else {
+    if (gate.auto) gate.resume();
+    if (busy) { wakeLock = null; keepAwake(true); }
+  }
+});
+addEventListener('pagehide', () => { scanState.flush?.(); saveJob(true); });
+addEventListener('beforeunload', e => {
+  if (state.running || scanState.running) { e.preventDefault(); e.returnValue = ''; }
+});
 
 // ---------- Worker pool ----------
 // Cada foto decodificada ocupa ~4 bytes por pixel: con poca RAM se usan menos workers.
@@ -50,15 +95,14 @@ const pool = (() => {
       w.postMessage(w.job.msg);
     }
   }
+  const send = msg => new Promise((resolve, reject) => { queue.push({ msg: { id: ++seq, ...msg }, resolve, reject }); next(); });
   return {
     size,
-    run(file, level, skipSpecial = false) {
-      const { quality, maxSide } = LEVELS[level];
-      return new Promise((resolve, reject) => {
-        queue.push({ msg: { id: ++seq, file, quality, maxSide, skipSpecial }, resolve, reject });
-        next();
-      });
+    run(file, o, skipSpecial = false) {
+      const { quality, maxSide } = LEVELS[o.level];
+      return send({ file, quality, maxSide, skipSpecial, engine: o.engine });
     },
+    thumb: file => send({ type: 'thumb', file, size: 320 }),
   };
 })();
 
@@ -69,6 +113,7 @@ function readOpts() {
     photos: $('opt-photos').checked, png: $('opt-png').checked, video: $('opt-video').checked,
     motion: document.querySelector('input[name=motion]:checked').value,
     trash: $('opt-trash').checked,
+    engine: $('opt-mozjpeg').checked ? 'mozjpeg' : 'native',
   };
 }
 async function loadPrefs() {
@@ -78,12 +123,13 @@ async function loadPrefs() {
   if (p.png !== undefined) $('opt-png').checked = p.png;
   if (p.video !== undefined) $('opt-video').checked = p.video;
   if (p.trash !== undefined) $('opt-trash').checked = p.trash;
+  $('opt-mozjpeg').checked = p.engine === 'mozjpeg';
   const motion = document.querySelector(`input[name=motion][value="${p.motion}"]`);
   if (motion) motion.checked = true;
   $('level-hint').textContent = LEVELS[readOpts().level].hint;
 }
 document.addEventListener('change', e => {
-  if (!e.target.closest('.card')) return;
+  if (!e.target.closest('main .card')) return;
   const o = readOpts();
   store.put('prefs', o, 'opts');
   $('level-hint').textContent = LEVELS[o.level].hint;
@@ -149,19 +195,19 @@ function invalidate() { state.analysis = null; state.calib = {}; renderSeq++; $(
 // análisis reutiliza lo ya revisado y un análisis terminado se muestra al instante al volver a abrir.
 const SCAN_CONCURRENCY = 6;
 const SLOW_TEST = Number(new URLSearchParams(location.search).get('lento')) || 0; // pruebas: simula un celular lento
-const scanState = { running: false, abort: null };
+const scanState = { running: false, abort: null, flush: null };
 const ABORTED = new Error('aborted');
-const fileKey = (rootId, path, name) => `${rootId}|${path}|${name}`;
 const statusKey = root => `scan:${root.id}`;
 
 // Lo que se guarda en IndexedDB de cada archivo (sin File ni handles).
 const record = (root, info) => ({
-  key: fileKey(root.id, info.path, info.name), rootId: root.id,
-  path: info.path, name: info.name, type: info.type, size: info.size, mtime: info.mtime,
+  v: RECORD_V, key: fileKey(root.id, info.path, info.name), rootId: root.id,
+  path: info.path, name: info.name, type: info.type, size: info.size, mtime: info.mtime, taken: info.taken || info.mtime,
   ...(info.type === 'photo' ? { motion: info.motion, special: info.special, pano: info.pano, hdr: info.hdr, compacted: info.compacted } : {}),
   ...('meta' in info ? { meta: info.meta } : {}),
 });
-const toItem = (root, rec) => ({ ...rec, root, key: `${root.id}|${rec.path}/${rec.name}|${rec.size}|${rec.mtime}` });
+// fk = clave del archivo; key = clave para recordar los que "no se pudieron reducir" (cambia si el archivo cambia)
+const toItem = (root, rec) => ({ ...rec, root, fk: rec.key, key: `${root.id}|${rec.path}/${rec.name}|${rec.size}|${rec.mtime}` });
 
 async function mapPool(list, n, fn) {
   let i = 0;
@@ -170,6 +216,7 @@ async function mapPool(list, n, fn) {
 
 // Interfaz del progreso del análisis (con actualizaciones agrupadas por cuadro para no frenar).
 const scanUi = {
+  text: '',
   show(on) {
     $('scan').hidden = !on; $('analyze').hidden = on;
     if (on) $('scan-note').hidden = true;
@@ -182,10 +229,14 @@ const scanUi = {
     $('scan-count').textContent = `${nf.format(n)} archivos encontrados`;
     $('scan-eta').textContent = '';
     $('scan-file').textContent = path || rootName;
+    this.text = `Buscando archivos · ${nf.format(n)}`;
   },
   pending: null,
   inspect(done, total, name, t0, label = 'Revisando fotos y videos') {
     this.pending = { done, total, name, t0, label };
+    const el = gate.elapsed(t0);
+    const eta = done > 20 && el > 3 ? `faltan ≈ ${fmtTime(el / done * (total - done))}` : '';
+    this.text = `${label} · ${nf.format(done)} de ${nf.format(total)}${eta ? ' · ' + eta : ''}`;
     if (this.raf) return;
     this.raf = requestAnimationFrame(() => {
       this.raf = 0;
@@ -194,7 +245,7 @@ const scanUi = {
       this.phase(label);
       $('scan-fill').style.width = `${total ? done / total * 100 : 100}%`;
       $('scan-count').textContent = `${nf.format(done)} de ${nf.format(total)} · ${total ? Math.floor(done / total * 100) : 100} %`;
-      const el = (performance.now() - t0) / 1000;
+      const el = gate.elapsed(t0);
       $('scan-eta').textContent = done > 20 && el > 3 ? `faltan ≈ ${fmtTime(el / done * (total - done))}` : '';
       $('scan-file').textContent = name;
     });
@@ -202,7 +253,8 @@ const scanUi = {
 };
 
 $('analyze').onclick = () => analyze();
-$('scan-stop').onclick = () => scanState.abort?.abort();
+$('scan-stop').onclick = () => { gate.resume(); scanState.abort?.abort(); };
+$('scan-pause').onclick = () => gate.paused ? gate.resume() : gate.pause();
 
 async function analyze() {
   if (scanState.running || state.running) return;
@@ -211,6 +263,7 @@ async function analyze() {
   const o = readOpts();
   const ac = new AbortController();
   Object.assign(scanState, { running: true, abort: ac });
+  gate.reset(); pauseUi();
   scanUi.show(true);
   await keepAwake(true);
   try {
@@ -234,10 +287,11 @@ async function analyze() {
       const flush = async () => { lastFlush = performance.now(); if (batch.length) await store.putMany('files', batch.splice(0)); };
       scanState.flush = flush;
       await mapPool(cands, SCAN_CONCURRENCY, async c => {
+        await gate.wait();
         if (ac.signal.aborted) return;
         const key = fileKey(r.id, c.path, c.name);
         seen.add(key);
-        if (SLOW_TEST && !cached.has(key)) await new Promise(res => setTimeout(res, SLOW_TEST));
+        if (SLOW_TEST && cached.get(key)?.v !== RECORD_V) await new Promise(res => setTimeout(res, SLOW_TEST));
         try {
           const { info, fresh } = await inspect(c, cached.get(key), o.video);
           if (info && fresh) batch.push(record(r, info));
@@ -259,18 +313,24 @@ async function analyze() {
     else alert('Error al revisar: ' + e.message);
   } finally {
     Object.assign(scanState, { running: false, flush: null });
+    gate.reset(); pauseUi();
     scanUi.show(false);
+    night.refresh();
     if (!state.running) await keepAwake(false);
   }
 }
-// Si la app pasa a segundo plano (cambiar de app, apagar pantalla) se guarda lo revisado de inmediato.
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') scanState.flush?.(); });
+
+async function loadMarks() {
+  state.protect = new Set(await store.keys('protect'));
+  state.trashMap = new Map((await store.all('trash')).map(t => [fileKey(t.rootId, t.path, t.finalName), t]));
+}
 
 // Muestra el último análisis guardado sin volver a leer las carpetas. Si alguno quedó a medias,
 // ofrece continuarlo (lo ya revisado no se repite).
 async function restoreAnalysis() {
   const roots = state.roots.filter(r => r.ok);
   if (!roots.length) return;
+  await loadMarks();
   const items = [], counts = { files: 0, heic: 0 };
   let at = 0, missing = 0;
   const partial = [];
@@ -299,17 +359,21 @@ async function restoreAnalysis() {
   state.analysis = { items, counts, skip: new Set(await store.keys('skip')), at };
   $('analyze').textContent = 'Volver a analizar';
   await renderAnalysis();
+  await renderJob();
 }
 
 // Las carpetas guardadas solo tienen ruta y nombre: se busca el archivo justo antes de usarlo.
 const dirCache = new Map();
+async function dirOf(root, path) {
+  const dk = `${root.id}|${path}`;
+  let dir = dirCache.get(dk);
+  if (!dir) { dir = await getDirPath(root.handle, path, false); dirCache.set(dk, dir); }
+  return dir;
+}
 async function resolveItem(item) {
   if (item.file && item.dir) return item;
-  const dk = `${item.root.id}|${item.path}`;
-  let dir = dirCache.get(dk);
-  if (!dir) { dir = await getDirPath(item.root.handle, item.path, false); dirCache.set(dk, dir); }
-  item.dir = dir;
-  item.file = await (await dir.getFileHandle(item.name)).getFile();
+  item.dir = await dirOf(item.root, item.path);
+  item.file = await (await item.dir.getFileHandle(item.name)).getFile();
   item.size = item.file.size;
   return item;
 }
@@ -320,7 +384,7 @@ async function measureVideos(videos) {
   scanState.running = true;
   scanUi.show(true);
   scanUi.phase('Midiendo videos');
-  $('scan-stop').hidden = true; // medir videos es rápido: no se ofrece detener
+  $('scan-actions').hidden = true; // medir videos es rápido: no se ofrece pausar ni detener
   const t0 = performance.now();
   let done = 0;
   const batch = [];
@@ -329,6 +393,7 @@ async function measureVideos(videos) {
       try {
         await resolveItem(v);
         v.meta = await quickProbe(v.file).catch(() => null);
+        if (v.meta?.created) v.taken = v.meta.created;
       } catch { v.meta = null; }
       batch.push(record(v.root, v));
       scanUi.inspect(++done, videos.length, v.name, t0, 'Midiendo videos');
@@ -337,30 +402,40 @@ async function measureVideos(videos) {
   } finally {
     scanState.running = false;
     scanUi.show(false);
-    $('scan-stop').hidden = false;
+    $('scan-actions').hidden = false;
   }
+}
+
+// ---------- Estado de cada archivo ----------
+// pending: se compactaría con las opciones actuales; reason: por qué no (si no).
+function flagsOf(it, o = readOpts()) {
+  const prot = state.protect.has(it.fk);
+  const trash = state.trashMap.get(it.fk) || null;
+  const compacted = it.type === 'video' ? !!it.meta?.compacted : !!it.compacted;
+  let pending = false, reason = null;
+  if (!compacted && !prot) {
+    const skip = state.analysis?.skip.has(`${it.key}|${o.level}`);
+    if (it.type === 'video') {
+      reason = !o.video ? 'off' : it.meta === undefined ? 'unmeasured' : (!it.meta || it.size < MIN_VIDEO) ? 'heavy' : skip ? 'remembered' : null;
+    } else {
+      reason = (it.type === 'photo' ? !o.photos : !o.png) ? 'off' : it.pano ? 'pano'
+        : (it.motion || it.special) && o.motion === 'skip' ? 'motion' : skip ? 'remembered' : it.size < MIN_PHOTO ? 'small' : null;
+    }
+    pending = !reason;
+  }
+  return { pending, compacted, inTrash: !!trash, trash, protected: prot, reason };
 }
 
 // Qué archivos se procesarían con las opciones actuales.
 function selection(o) {
-  const { items, skip } = state.analysis;
   const photos = [], videos = [];
-  const stats = { compacted: 0, compactedVideo: 0, motion: 0, pano: 0, remembered: 0 };
-  for (const it of items) {
-    if (it.type === 'photo' || it.type === 'png') {
-      if (it.type === 'photo' ? !o.photos : !o.png) continue;
-      if (it.compacted) { stats.compacted++; continue; }
-      if (it.pano) { stats.pano++; continue; } // al reducirla perdería la vista 360°
-      if ((it.motion || it.special) && o.motion === 'skip') { stats.motion++; continue; }
-      if (skip.has(`${it.key}|${o.level}`)) { stats.remembered++; continue; }
-      if (it.size < 150 * 1024) continue; // ya es pequeña
-      photos.push(it);
-    } else if (it.type === 'video' && o.video) {
-      if (!it.meta || it.size < MIN_VIDEO) continue;
-      if (it.meta.compacted) { stats.compactedVideo++; continue; }
-      if (skip.has(`${it.key}|${o.level}`)) { stats.remembered++; continue; }
-      videos.push(it);
-    }
+  const stats = { compacted: 0, compactedVideo: 0, motion: 0, pano: 0, remembered: 0, protected: 0 };
+  for (const it of state.analysis.items) {
+    const f = flagsOf(it, o);
+    if (f.pending) (it.type === 'video' ? videos : photos).push(it);
+    else if (f.protected) stats.protected++;
+    else if (f.compacted) stats[it.type === 'video' ? 'compactedVideo' : 'compacted']++;
+    else if (f.reason in stats) stats[f.reason]++;
   }
   return { photos, videos, stats };
 }
@@ -386,6 +461,7 @@ async function renderAnalysis() {
   if (o.video) facts.push(`<b>${nf.format(videos.length)}</b> videos para compactar (${fmtBytes(sum(videos))})`);
   if (stats.compacted) facts.push(`${nf.format(stats.compacted)} fotos ya estaban compactadas`);
   if (stats.compactedVideo) facts.push(`${nf.format(stats.compactedVideo)} videos ya estaban compactados`);
+  if (stats.protected) facts.push(`🛡 ${nf.format(stats.protected)} archivos protegidos: no se tocan`);
   if (stats.motion) facts.push(`${nf.format(stats.motion)} fotos en movimiento o de retrato se dejan igual (cámbialo en Opciones)`);
   if (stats.pano) facts.push(`${nf.format(stats.pano)} fotos 360° se dejan igual`);
   if (stats.remembered) facts.push(`${nf.format(stats.remembered)} archivos ya no se podían reducir más`);
@@ -402,15 +478,13 @@ async function renderAnalysis() {
   if (!total) { $('saving').innerHTML = 'Todo está compacto.<small>No hay nada que reducir con estas opciones.</small>'; return; }
   $('saving').innerHTML = `Calculando el ahorro…<small>Probando con algunas fotos</small>`;
   const videoEst = await estimateVideos(videos, o.level);
-  const calib = photos.length ? await calibrate(photos, o.level) : null;
+  const calib = photos.length ? await calibrate(photos, o) : null;
   if (seq !== renderSeq) return; // cambiaron las opciones mientras calculaba
   const photoOut = calib ? sum(photos) * calib.ratio : 0;
   const before = sum(photos) + sum(videos);
   const after = photoOut + videoEst;
   $('saving').innerHTML = `Liberarías ≈ ${fmtBytes(before - after)}<small>${fmtBytes(before)} → ≈ ${fmtBytes(after)}${calib ? ` · las fotos quedan en ≈ ${Math.round(calib.ratio * 100)} % de su tamaño` : ''}</small>`;
 }
-
-const sum = arr => arr.reduce((n, i) => n + i.size, 0);
 
 async function estimateVideos(videos, level) {
   if (!videos.length) return 0;
@@ -419,18 +493,18 @@ async function estimateVideos(videos, level) {
   return videos.reduce((n, v) => n + Math.min(v.size, planVideo(v.meta, level, hevc).estimated), 0);
 }
 
-// MKompact de verdad unas cuantas fotos (sin guardarlas) para estimar el ahorro y para la vista previa.
+// Compacta de verdad unas cuantas fotos (sin guardarlas) para estimar el ahorro y para la vista previa.
 // Se guarda la promesa: si la vista previa la pide mientras se calcula, no se repite el trabajo.
-function calibrate(photos, level) {
-  return (state.calib[level] ??= calibrateNow(photos, level));
+function calibrate(photos, o) {
+  return (state.calib[`${o.level}|${o.engine}`] ??= calibrateNow(photos, o));
 }
-async function calibrateNow(photos, level) {
+async function calibrateNow(photos, o) {
   const n = Math.min(4, photos.length);
   const picks = Array.from({ length: n }, (_, i) => photos[Math.floor((i + 0.5) * photos.length / n)]);
   const samples = await Promise.all(picks.map(async item => {
     try {
       await resolveItem(item);
-      const r = await pool.run(item.file, level, readOpts().motion === 'skip');
+      const r = await pool.run(item.file, o, o.motion === 'skip');
       if (!r.buffer) return null;
       return { item, blob: new Blob([r.buffer], { type: 'image/jpeg' }), size: r.buffer.byteLength };
     } catch { return null; }
@@ -448,13 +522,14 @@ let pvIndex = 0, pvUrls = [];
 $('preview-btn').onclick = async () => {
   const o = readOpts();
   const { photos } = selection(o);
-  const calib = await calibrate(photos, o.level);
+  const calib = await calibrate(photos, o);
   if (!calib.samples.length) return alert('No se pudo generar la vista previa.');
   showSample(calib.samples[pvIndex % calib.samples.length]);
   $('preview').showModal();
 };
 $('pv-next').onclick = async () => {
-  const { samples } = await state.calib[readOpts().level];
+  const o = readOpts();
+  const { samples } = await state.calib[`${o.level}|${o.engine}`];
   showSample(samples[++pvIndex % samples.length]);
 };
 $('pv-close').onclick = () => $('preview').close();
@@ -493,26 +568,19 @@ function confirmDialog(text, title = '', fatal = false) {
     d.oncancel = () => res(false);
   });
 }
+const trashText = o => o.trash
+  ? 'Los originales se guardan en la papelera de MKompact: podrás revisarlos uno por uno y restaurarlos. El espacio se libera cuando apruebes o vacíes la papelera.'
+  : '⚠️ Los originales se BORRARÁN en cuanto se verifique cada copia. No se podrán recuperar.';
 
 // ---------- Proceso ----------
 $('run').onclick = async () => {
   const o = readOpts();
   const { photos, videos } = selection(o);
   const n = photos.length + videos.length;
-  const ok = await confirmDialog(o.trash
-    ? `Se van a compactar ${nf.format(n)} archivos.\n\nLos originales se guardan en la papelera de MKompact: podrás revisar el resultado y restaurarlos. El espacio se libera cuando vacíes la papelera.`
-    : `Se van a compactar ${nf.format(n)} archivos.\n\n⚠️ Los originales se BORRARÁN en cuanto se verifique cada copia. No se podrán recuperar.`,
-    'Round 1', !o.trash);
-  if (ok) process(photos, videos, o);
+  if (await confirmDialog(`Se van a compactar ${nf.format(n)} archivos.\n\n${trashText(o)}`, 'Round 1', !o.trash)) process(photos, videos, o);
 };
-$('pause').onclick = () => {
-  state.paused = !state.paused;
-  $('pause').textContent = state.paused ? 'Continuar' : 'Pausar';
-  if (!state.paused) resumeWaiters.splice(0).forEach(f => f());
-};
-$('stop').onclick = () => { state.stopped = true; state.paused = false; resumeWaiters.splice(0).forEach(f => f()); state.cancelVideo?.(); };
-const resumeWaiters = [];
-const waitIfPaused = () => state.paused ? new Promise(r => resumeWaiters.push(r)) : null;
+$('pause').onclick = () => gate.paused ? gate.resume() : gate.pause();
+$('stop').onclick = () => { state.stopped = true; gate.resume(); state.cancelVideo?.(); };
 
 // Anuncio de inicio: dura ~1 s y no bloquea nada (pointer-events: none).
 function fight() {
@@ -531,72 +599,109 @@ async function keepAwake(on) {
     if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
   } catch { /* no disponible */ }
 }
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && (state.running || scanState.running)) { wakeLock = null; keepAwake(true); }
-});
-// Pedir confirmación si se intenta recargar o salir a media tarea.
-addEventListener('beforeunload', e => {
-  if (state.running || scanState.running) { e.preventDefault(); e.returnValue = ''; }
-});
 
-async function process(photos, videos, o) {
-  Object.assign(state, { running: true, paused: false, stopped: false });
-  $('analysis').hidden = true; $('done').hidden = true; $('progress').hidden = false;
+// La compactación en curso se guarda como "trabajo": si la app se cierra, al volver se ofrece continuarla.
+const job = { keys: null, opts: null, explicit: false, dirty: false, last: 0 };
+function saveJob(force = false) {
+  if (!job.keys || (!job.dirty && !force)) return;
+  if (!force && performance.now() - job.last < 1000) return;
+  job.dirty = false; job.last = performance.now();
+  store.put('prefs', { keys: [...job.keys], opts: job.opts, explicit: job.explicit, at: Date.now() }, 'job').catch(() => {});
+}
+async function renderJob() {
+  const saved = state.running ? null : await store.get('prefs', 'job');
+  // Se descuenta lo que ya quedó compactado (el trabajo guardado puede ir hasta 1 s atrasado)
+  const keys = new Set(saved?.keys || []);
+  const items = saved && state.analysis ? state.analysis.items.filter(i => keys.has(i.fk) && !flagsOf(i, saved.opts).compacted) : [];
+  if (saved && !items.length) await store.del('prefs', 'job');
+  $('job-note').hidden = !items.length;
+  if (!items.length) return;
+  $('job-text').textContent = `Quedó una compactación pendiente: ${nf.format(items.length)} archivos (${fmtBytes(sum(items))}). Lo ya compactado está guardado.`;
+  $('job-resume').onclick = () => {
+    $('job-note').hidden = true;
+    process(items.filter(i => i.type !== 'video'), items.filter(i => i.type === 'video' && i.meta), saved.opts, { explicit: saved.explicit });
+  };
+  $('job-discard').onclick = async () => { await store.del('prefs', 'job'); $('job-note').hidden = true; };
+}
+
+async function process(photos, videos, o, { explicit = false } = {}) {
+  Object.assign(state, { running: true, stopped: false });
+  gate.reset(); pauseUi();
+  $('analysis').hidden = true; $('done').hidden = true; $('job-note').hidden = true; $('progress').hidden = false;
   $('analyze').disabled = true; $('add-root').disabled = true;
-  $('pause').textContent = 'Pausar';
   fight();
   await keepAwake(true);
+  Object.assign(job, { keys: new Set([...photos, ...videos].map(i => i.fk)), opts: o, explicit, dirty: true });
+  saveJob(true);
 
   const total = photos.length + videos.length;
-  const totalBytes = sum(photos) + sum(videos);
-  const r = { done: 0, bytesDone: 0, saved: 0, skipped: 0, ignored: 0, errors: [] };
+  const videoBytes = sum(videos);
+  const r = { done: 0, saved: 0, skipped: 0, ignored: 0, errors: [], photosDone: 0, videoBytesDone: 0, t: { compress: 0, save: 0, n: 0 } };
   const t0 = performance.now();
-  const update = (name, frac = 0) => {
-    const doneBytes = r.bytesDone + frac;
-    $('bar-fill').style.width = `${(doneBytes / totalBytes) * 100}%`;
+  let tVideo = 0, current = '', frac = 0, curSize = 0;
+  const eta = () => {
+    if (r.photosDone < photos.length) {
+      const el = gate.elapsed(t0);
+      if (r.photosDone < 3 || el < 5) return '';
+      const s = el / r.photosDone * (photos.length - r.photosDone);
+      return `faltan ≈ ${fmtTime(s)} de fotos${videos.length ? ` + ${nf.format(videos.length)} videos` : ''}`;
+    }
+    if (!videos.length || !tVideo) return '';
+    const el = gate.elapsed(tVideo), doneB = r.videoBytesDone + frac;
+    return doneB > 0 && el > 10 ? `faltan ≈ ${fmtTime(el / doneB * (videoBytes - doneB))}` : 'midiendo velocidad…';
+  };
+  const update = (name, f = 0, size = 0) => {
+    frac = f; curSize = size || curSize;
+    if (name) current = name;
+    const doneUnits = r.done + (f && curSize ? f / curSize : 0);
+    $('bar-fill').style.width = `${Math.min(100, doneUnits / total * 100)}%`;
     $('prog-count').textContent = `${nf.format(r.done)} de ${nf.format(total)}`;
-    const el = (performance.now() - t0) / 1000;
-    $('prog-eta').textContent = doneBytes > 0 && el > 5 ? `faltan ≈ ${fmtTime(el / doneBytes * (totalBytes - doneBytes))}` : '';
-    if (name) $('prog-file').textContent = name;
+    $('prog-eta').textContent = eta();
+    $('prog-file').textContent = current;
     $('prog-saved').textContent = `Ahorrado: ${fmtBytes(r.saved)}`;
   };
+  nightText = () => state.running
+    ? `MKompact · ${nf.format(r.done)} de ${nf.format(total)} · ${eta() || 'trabajando'} · ahorrado ${fmtBytes(r.saved)}`
+    : `MKompact · listo · ahorraste ${fmtBytes(r.saved)}`;
   update('Preparando…');
 
   const finish = async (item, res) => {
-    r.done++; r.bytesDone += item.size;
+    r.done++;
+    if (item.type === 'video') r.videoBytesDone += item.size; else r.photosDone++;
     if (res.error) r.errors.push(`${item.path ? item.path + '/' : ''}${item.name}: ${res.error}`);
     else if (res.ignored) r.ignored++;
     else if (res.skipped) { r.skipped++; await store.put('skip', 1, `${item.key}|${o.level}`); }
     else {
       r.saved += item.size - res.newSize;
-      // El análisis guardado se actualiza al momento: si la app se cierra, no se vuelve a procesar.
-      const oldKey = fileKey(item.root.id, item.path, item.name);
-      if (res.finalName !== item.name) await store.del('files', oldKey);
-      await store.put('files', record(item.root, {
-        ...item, name: res.finalName, size: res.newSize, mtime: res.newMtime,
-        type: item.type === 'png' ? 'photo' : item.type,
-        compacted: true, motion: false, special: false, pano: false, hdr: false,
-        ...(item.type === 'video' ? { meta: { ...item.meta, compacted: true } } : {}),
-      }));
+      if (res.t) { r.t.compress += res.t.compress; r.t.save += res.t.save; r.t.n++; }
       if (res.trashPath) {
         await store.put('trash', {
           rootId: item.root.id, path: item.path, name: item.name, finalName: res.finalName,
           trashPath: res.trashPath, origSize: item.size, newSize: res.newSize, date: Date.now(),
         });
       }
+      // El análisis guardado se actualiza al momento: si la app se cierra, no se vuelve a procesar.
+      if (res.finalName !== item.name) await store.del('files', item.fk);
+      await store.put('files', record(item.root, {
+        ...item, name: res.finalName, size: res.newSize, mtime: res.newMtime,
+        type: item.type === 'png' ? 'photo' : item.type,
+        compacted: true, motion: false, special: false, pano: false, hdr: false,
+        ...(item.type === 'video' ? { meta: { ...item.meta, compacted: true } } : {}),
+      }));
     }
+    job.keys.delete(item.fk); job.dirty = true; saveJob();
     update();
   };
 
-  // Fotos: se comprimen en paralelo (workers) y se reemplazan una por una.
+  // Fotos: se comprimen en paralelo (workers) y se guardan una por una.
   let idx = 0;
   const photoLane = async () => {
     while (idx < photos.length && !state.stopped) {
-      await waitIfPaused();
+      await gate.wait();
       if (state.stopped) break;
       const item = photos[idx++];
       update(item.name);
-      await finish(item, await doPhoto(item, o).catch(e => ({ error: e.message })));
+      await finish(item, await doPhoto(item, o, explicit).catch(e => ({ error: e.message })));
     }
   };
   await Promise.all(Array.from({ length: pool.size }, photoLane));
@@ -604,50 +709,61 @@ async function process(photos, videos, o) {
   // Videos: de uno en uno (el codificador del teléfono es uno solo).
   if (videos.length && !state.stopped) {
     const vmod = await import('./video.js');
+    tVideo = performance.now();
     for (const item of videos) {
-      await waitIfPaused();
+      await gate.wait();
       if (state.stopped) break;
       update(`🎬 ${item.name}`);
-      const res = await doVideo(item, o, vmod, p => update(`🎬 ${item.name} · ${Math.round(p * 100)} %`, item.size * p))
+      const res = await doVideo(item, o, vmod, p => update(`🎬 ${item.name} · ${Math.round(p * 100)} %`, item.size * p, item.size))
         .catch(e => ({ error: state.stopped ? 'Detenido' : e.message }));
       state.cancelVideo = null;
       await finish(item, res);
     }
   }
 
-  await keepAwake(false);
+  if (!state.stopped && !job.keys.size) await store.del('prefs', 'job');
+  else saveJob(true);
+  job.keys = null;
   Object.assign(state, { running: false });
+  gate.reset(); pauseUi();
   $('progress').hidden = true; $('done').hidden = false;
   $('analyze').disabled = false; $('add-root').disabled = false;
   const banner = state.stopped ? ['Ronda detenida', ' lost'] : r.errors.length ? ['Victory', ''] : ['Flawless victory', ''];
-  $('done-title').innerHTML = `<span class="victory${banner[1]}">${banner[0]}</span>Ahorraste ${fmtBytes(r.saved)}<small>${o.trash ? 'Vacía la papelera de MKompact (abajo) para liberar el espacio.' : 'El espacio ya quedó libre.'}</small>`;
+  $('done-title').innerHTML = `<span class="victory${banner[1]}">${banner[0]}</span>Ahorraste ${fmtBytes(r.saved)}<small>${o.trash ? 'Revisa lo compactado y aprueba o vacía la papelera (abajo) para liberar el espacio.' : 'El espacio ya quedó libre.'}</small>`;
   const facts = [`<b>${nf.format(r.done - r.skipped - r.ignored - r.errors.length)}</b> archivos compactados`];
   if (r.skipped) facts.push(`${nf.format(r.skipped)} se dejaron igual porque no bajaban al menos ${MIN_SAVING * 100} %`);
   if (r.ignored) facts.push(`${nf.format(r.ignored)} se saltaron (ya compactadas, en movimiento o 360°)`);
-  if (state.stopped && r.done < total) facts.push(`${nf.format(total - r.done)} quedaron pendientes`);
+  if (state.stopped && r.done < total) facts.push(`${nf.format(total - r.done)} quedaron pendientes: puedes continuar después`);
+  if (r.t.n) facts.push(`Promedio por foto: ${((r.t.compress + r.t.save) / r.t.n / 1000).toFixed(1)} s (comprimir ${(r.t.compress / r.t.n / 1000).toFixed(1)} s · guardar ${(r.t.save / r.t.n / 1000).toFixed(1)} s)`);
   $('done-facts').replaceChildren(...facts.map(li));
   $('errors').hidden = !r.errors.length;
   $('errors').querySelector('summary').textContent = `${r.errors.length} con error (el original quedó intacto)`;
   $('error-list').replaceChildren(...r.errors.map(t => { const e = document.createElement('li'); e.textContent = t; return e; }));
   state.analysis = null; state.calib = {};
+  night.refresh();
+  await keepAwake(false);
   renderTrash();
   await restoreAnalysis(); // muestra lo que falta, ya con lo compactado descontado
 }
 
-async function doPhoto(item, o) {
+async function doPhoto(item, o, explicit) {
   await resolveItem(item);
-  const res = await pool.run(item.file, o.level, o.motion === 'skip');
+  const res = await pool.run(item.file, o, !explicit && o.motion === 'skip');
   if (res.ignored) return { ignored: res.ignored };
   const out = res.buffer;
   if (out.byteLength > item.size * (1 - MIN_SAVING)) return { skipped: true };
-  return replaceFile({
+  const t1 = performance.now();
+  const saved = await replaceFile({
     root: item.root.handle, item, keepOriginal: o.trash,
     write: w => w.write(out),
+    // Se compara byte por byte lo escrito con lo comprimido: tan seguro como decodificar y mucho más rápido.
     verify: async f => {
       if (f.size !== out.byteLength) throw new Error('La copia no se guardó completa');
-      (await createImageBitmap(f)).close();
+      const a = new Uint8Array(await f.arrayBuffer()), b = new Uint8Array(out);
+      for (let k = 0; k < a.length; k++) if (a[k] !== b[k]) throw new Error('La copia guardada no coincide');
     },
   });
+  return { ...saved, t: { compress: res.ms || 0, save: performance.now() - t1 } };
 }
 
 async function doVideo(item, o, vmod, onProgress) {
@@ -658,7 +774,7 @@ async function doVideo(item, o, vmod, onProgress) {
   const plan = vmod.planVideo(item.meta, o.level, codec === 'hevc');
   if (plan.estimated > item.size * (1 - MIN_SAVING)) return { skipped: true };
   const gps = await vmod.readLocationBoxes(item.file).catch(() => null);
-  const res = await replaceFile({
+  return replaceFile({
     root: item.root.handle, item, keepOriginal: o.trash,
     write: w => vmod.convertVideo(item.file, plan, codec, w, onProgress, c => { state.cancelVideo = c; }),
     finalize: tmp => gps && vmod.injectLocation(tmp, gps),
@@ -670,57 +786,143 @@ async function doVideo(item, o, vmod, onProgress) {
     if (e.message === 'No se redujo lo suficiente') return { skipped: true };
     throw e;
   });
-  return res;
 }
 
-// ---------- Papelera ----------
+// ---------- Papelera: restaurar, aprobar, vaciar ----------
+const rootById = id => state.roots.find(r => r.id === id);
+
+// Regresa originales a su lugar y actualiza el análisis guardado de esos archivos.
+async function restoreRecs(recs) {
+  let fails = 0;
+  for (const rec of recs) {
+    const root = rootById(rec.rootId);
+    if (!root) { fails++; continue; }
+    try {
+      const name = await restore(root.handle, rec);
+      await store.del('trash', rec.id);
+      await store.del('files', fileKey(root.id, rec.path, rec.finalName));
+      const dir = await dirOf(root, rec.path);
+      const { info } = await inspect({ dir, handle: await dir.getFileHandle(name), path: rec.path, name, type: typeOf(name) }, null, readOpts().video);
+      if (info) await store.put('files', record(root, info));
+    } catch (e) {
+      if (e.name === 'NotFoundError') await store.del('trash', rec.id); // el original ya no está en la papelera
+      else fails++;
+    }
+  }
+  if (fails) alert(`${fails} no se pudieron restaurar (quizá se movieron o borraron).`);
+  return true;
+}
+
+// Aprobar: el original de la papelera se borra definitivamente (se libera su espacio).
+async function approveRecs(recs) {
+  for (const rec of recs) {
+    const root = rootById(rec.rootId);
+    if (!root) continue;
+    try {
+      const parts = rec.trashPath.split('/');
+      const name = parts.pop();
+      const tdir = await getDirPath(await root.handle.getDirectoryHandle(TRASH), parts.join('/'), false);
+      await tdir.removeEntry(name);
+    } catch (e) { if (e.name !== 'NotFoundError') { alert('No se pudo borrar un original: ' + e.message); return false; } }
+    await store.del('trash', rec.id);
+  }
+  return true;
+}
+
 async function renderTrash() {
   const rows = [];
+  let anyRecs = false;
   for (const r of state.roots.filter(r => r.ok)) {
     const recs = await store.byIndex('trash', 'root', r.id);
+    anyRecs ||= recs.length > 0;
     const size = recs.reduce((n, x) => n + (x.origSize || 0), 0) || await trashSize(r.handle);
     if (!size) continue;
-    const e = li(`<span class="name">${esc(r.name)}<small>${fmtBytes(size)} en originales</small></span>`);
-    const restoreBtn = Object.assign(document.createElement('button'), { className: 'btn secondary', textContent: 'Restaurar' });
+    const e = li(`<span class="name">${esc(r.name)}<small>${nf.format(recs.length)} originales · ${fmtBytes(size)}</small></span>`);
+    const restoreBtn = Object.assign(document.createElement('button'), { className: 'btn secondary', textContent: 'Restaurar todo' });
     const emptyBtn = Object.assign(document.createElement('button'), { className: 'btn danger', textContent: 'Vaciar' });
     restoreBtn.onclick = async () => {
-      const recs = await store.byIndex('trash', 'root', r.id);
       if (!await confirmDialog(`¿Regresar ${nf.format(recs.length)} originales a su lugar? Se quitarán sus versiones compactas.`, 'Restaurar')) return;
       restoreBtn.disabled = emptyBtn.disabled = true;
-      let fails = 0;
-      for (const rec of recs) {
-        try { await restore(r.handle, rec); await store.del('trash', rec.id); } catch (e) {
-          if (e.name === 'NotFoundError') await store.del('trash', rec.id); // el original ya no está en la papelera
-          else fails++;
-        }
-      }
-      if (fails) alert(`${fails} no se pudieron restaurar (quizá se movieron o borraron).`);
-      if (!fails) await emptyTrash(r.handle);
-      // Los originales regresaron: el análisis guardado de esta carpeta ya no corresponde.
-      await store.delMany('files', recs.map(x => fileKey(r.id, x.path, x.finalName)));
-      const st = await store.get('prefs', statusKey(r));
-      if (st) await store.put('prefs', { ...st, complete: false, reason: 'restore' }, statusKey(r));
-      invalidate(); renderTrash(); restoreAnalysis();
+      await restoreRecs(recs);
+      if (!(await store.byIndex('trash', 'root', r.id)).length) await emptyTrash(r.handle);
+      renderTrash(); restoreAnalysis();
     };
     emptyBtn.onclick = async () => {
       if (!await confirmDialog(`¿Borrar definitivamente ${fmtBytes(size)} de originales de "${r.name}"?\n\nYa no podrás restaurarlos.`, 'Fatality', true)) return;
       restoreBtn.disabled = emptyBtn.disabled = true;
       await emptyTrash(r.handle);
-      for (const rec of await store.byIndex('trash', 'root', r.id)) await store.del('trash', rec.id);
-      renderTrash();
+      await store.delMany('trash', recs.map(x => x.id));
+      renderTrash(); restoreAnalysis();
     };
     e.append(restoreBtn, emptyBtn);
     rows.push(e);
   }
   $('trash-list').replaceChildren(...rows);
   $('trash-card').hidden = !rows.length;
+  $('trash-review').hidden = !anyRecs || !state.analysis;
 }
 
-// ---------- Inicio ----------
-if (!('showDirectoryPicker' in window) && !new URLSearchParams(location.search).has('opfs')) {
-  $('unsupported').hidden = false;
-  $('add-root').disabled = true;
-}
+// ---------- Galería ----------
+const thumbs = createThumbs({ resolveItem, pool });
+const gallery = createGallery({
+  items: () => state.analysis?.items || [],
+  flags: it => flagsOf(it),
+  thumbs, resolveItem,
+  trashFile: async it => {
+    const rec = state.trashMap.get(it.fk);
+    const parts = rec.trashPath.split('/');
+    const name = parts.pop();
+    const tdir = await getDirPath(await it.root.handle.getDirectoryHandle(TRASH), parts.join('/'), false);
+    return (await tdir.getFileHandle(name)).getFile();
+  },
+  async compact(items) {
+    if (state.running || scanState.running) { alert('Espera a que termine el proceso actual.'); return false; }
+    if (!items.length) return false;
+    const o = readOpts();
+    const { quickProbe } = await import('./mp4.js');
+    for (const v of items.filter(i => i.type === 'video' && i.meta === undefined)) {
+      await resolveItem(v).catch(() => {});
+      v.meta = v.file ? await quickProbe(v.file).catch(() => null) : null;
+    }
+    const photos = items.filter(i => i.type !== 'video'), videos = items.filter(i => i.type === 'video' && i.meta);
+    const special = photos.filter(i => i.motion || i.special).length;
+    const text = `Se van a compactar ${nf.format(photos.length + videos.length)} archivos seleccionados.`
+      + (special ? `\n\n${nf.format(special)} son fotos en movimiento o retratos: quedarán como foto fija.` : '')
+      + `\n\n${trashText(o)}`;
+    if (!await confirmDialog(text, 'Round 1', !o.trash)) return false;
+    process(photos, videos, o, { explicit: true });
+    return true;
+  },
+  async protect(items, on) {
+    const keys = items.map(i => i.fk);
+    if (on) await store.setKeys('protect', keys); else await store.delMany('protect', keys);
+    for (const k of keys) on ? state.protect.add(k) : state.protect.delete(k);
+  },
+  async restore(items) {
+    const recs = items.map(i => state.trashMap.get(i.fk)).filter(Boolean);
+    if (!recs.length) return false;
+    if (recs.length > 1 && !await confirmDialog(`¿Regresar ${nf.format(recs.length)} originales a su lugar? Se quitarán sus versiones compactas.`, 'Restaurar')) return false;
+    for (const i of items) thumbs.forget(i);
+    return restoreRecs(recs);
+  },
+  async approve(items) {
+    const recs = items.map(i => state.trashMap.get(i.fk)).filter(Boolean);
+    if (!recs.length) return false;
+    const bytes = recs.reduce((n, x) => n + (x.origSize || 0), 0);
+    if (!await confirmDialog(`¿Aprobar ${recs.length === 1 ? 'esta versión compactada' : `${nf.format(recs.length)} versiones compactadas`}?\n\nSe borra${recs.length === 1 ? ' el original' : 'n los originales'} de la papelera y se liberan ${fmtBytes(bytes)}. No se puede deshacer.`, 'Fatality', true)) return false;
+    return approveRecs(recs);
+  },
+  async refresh() { await restoreAnalysis(); renderTrash(); },
+  onClose() { if (state.analysis) renderAnalysis(); },
+});
+$('gallery-btn').onclick = () => gallery.open('pending');
+$('trash-review').onclick = () => gallery.open('trash');
+
+// ---------- Modo noche ----------
+let nightText = () => 'MKompact';
+const night = createNight(() => scanState.running ? `MKompact · ${scanUi.text}` : nightText());
+for (const id of ['night-btn', 'scan-night']) $(id).onclick = () => night.enter();
+
 // ---------- Actualizaciones ----------
 const versionLabel = v => v ? v.replace('mkompact-', '') : 'sin instalar';
 async function installedVersion() {
@@ -797,9 +999,15 @@ async function startServiceWorker() {
   await navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {});
 }
 
+// ---------- Inicio ----------
+if (!('showDirectoryPicker' in window) && !new URLSearchParams(location.search).has('opfs')) {
+  $('unsupported').hidden = false;
+  $('add-root').disabled = true;
+}
 await loadPrefs();
 await loadRoots();
 await restoreAnalysis();
+renderTrash();
 showVersion();
 startServiceWorker();
-window.__mkompact = { state, analyze, selection, readOpts, restoreAnalysis }; // para pruebas
+window.__mkompact = { state, analyze, selection, readOpts, restoreAnalysis, gallery, gate, night, flagsOf }; // para pruebas

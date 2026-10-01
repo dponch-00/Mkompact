@@ -1,6 +1,6 @@
 // IndexedDB mínimo: carpetas autorizadas, papelera, archivos que no conviene volver a intentar
 // y el resultado del análisis de cada archivo (para no perder el avance si se recarga la app).
-const DB = 'mkompact', VERSION = 2;
+const DB = 'mkompact', VERSION = 3;
 let dbp;
 
 function db() {
@@ -17,6 +17,10 @@ function db() {
       if (e.oldVersion < 2) {
         // key = `${rootId}|${path}|${name}`
         d.createObjectStore('files', { keyPath: 'key' }).createIndex('root', 'rootId');
+      }
+      if (e.oldVersion < 3) {
+        d.createObjectStore('protect'); // clave = fileKey; MKompact nunca toca esos archivos
+        d.createObjectStore('thumbs');  // clave = fileKey|tamaño|fecha -> { blob, orient }
       }
     };
     r.onsuccess = () => res(r.result);
@@ -50,4 +54,6 @@ export const store = {
   // Varias escrituras en una sola transacción (mucho más rápido que una por una).
   putMany: (name, values) => tx(name, 'readwrite', s => { for (const v of values) s.put(v); }),
   delMany: (name, keys) => tx(name, 'readwrite', s => { for (const k of keys) s.delete(k); }),
+  // Para almacenes sin keyPath (la clave va aparte): marca varias claves con el mismo valor.
+  setKeys: (name, keys, value = 1) => tx(name, 'readwrite', s => { for (const k of keys) s.put(value, k); }),
 };

@@ -6,7 +6,8 @@ dispositivo; nada se sube a internet.
 
 ## Qué hace
 
-- **Fotos JPG** → JPEG optimizado con MozJPEG (el códec de Squoosh), con tres niveles:
+- **Fotos JPG** → JPEG con el compresor del navegador (rápido) o, en Opciones, con MozJPEG (el códec de
+  Squoosh: ~10 % más chico pero varias veces más lento), con tres niveles:
   | Nivel | Resolución máx. (lado largo) | Calidad |
   |---|---|---|
   | Suave | original | 85 |
@@ -26,6 +27,19 @@ dispositivo; nada se sube a internet.
   recarga o se cierra, al volver continúa donde se quedó, y un análisis terminado aparece al instante.
   Los videos solo se miden si se activan, leyendo únicamente su índice (`moov`). Se bloquea el gesto de
   "jalar para recargar" y se pide confirmación antes de salir a media tarea.
+- **Galería para elegir y revisar** (patrones de Google Photos, Files by Google y Slidebox): cuadrícula por
+  mes con la fecha real de captura (EXIF, nombre del archivo o fecha de grabación del video), filtros *Por
+  compactar / En papelera / Compactadas / Protegidas / Todas*, fotos o videos, orden por fecha o "más pesadas".
+  Mantener presionado selecciona y permite arrastrar sobre varias; el círculo del mes selecciona el mes
+  completo. Miniaturas instantáneas a partir de la miniatura que guarda la cámara en el EXIF (con caché).
+- **Visor para revisar una por una**: deslizar entre archivos; las compactadas muestran original vs.
+  compactada con deslizador. *Restaurar* regresa el original; *Aprobar* borra solo ese original y libera su
+  espacio; ambos pasan solos a la siguiente.
+- **Proteger** (🛡): los archivos marcados nunca se compactan, aunque se compacte "todo".
+- **Pausa automática**: al salir de la app se pausa en un punto seguro y continúa al regresar. Si Android la
+  cierra, al volver ofrece continuar la compactación pendiente.
+- **Modo noche**: pantalla negra (OLED: pixeles apagados) con el avance tenue que cambia de lugar; la app
+  sigue en primer plano para dejarla trabajando de noche con el celular cargando.
 - Antes de empezar, compacta de prueba unas fotos para **estimar el ahorro** y mostrar una **comparación
   antes/después** con zoom al 100 %.
 - Se salta lo que no baje al menos 20 %, lo que ya pasó por MKompact (marca `MKompact/1` en el JPEG / tag
@@ -79,7 +93,11 @@ js/mp4.js           lectura del índice MP4 (medidas, duración, fecha, ubicaci�
 js/jpeg.js          lectura/escritura de segmentos JPEG y EXIF (sin dependencias)
 js/photo-worker.js  decodifica, reduce, codifica con MozJPEG y reinyecta EXIF
 js/video.js         conversión y verificación de video (Mediabunny)
-js/store.js         IndexedDB (carpetas, papelera, preferencias, análisis guardado)
+js/store.js         IndexedDB (carpetas, papelera, preferencias, análisis guardado, protegidos, miniaturas)
+js/gallery.js       galería, selección por gestos y visor de revisión
+js/thumbs.js        miniaturas (EXIF, worker o cuadro de video) con caché y prioridad a lo visible
+js/night.js         Modo noche
+js/util.js          utilidades de interfaz y manejo del gesto "atrás" para pantallas encimadas
 vendor/             @jsquash/jpeg 1.6.0 (Apache-2.0) y mediabunny 1.61.0 (MPL-2.0, parche en PATCH.md)
 test/               servidor y página de pruebas (los fixtures se generan localmente, no van al repo)
 ```

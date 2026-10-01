@@ -19,6 +19,26 @@ export async function ensurePermission(handle, ask) {
   return (await handle.requestPermission(opts)) === 'granted';
 }
 
+// Versión de lo que se guarda por archivo: al cambiarla, el siguiente análisis vuelve a leer los datos.
+export const RECORD_V = 2;
+
+// Fecha a partir del nombre que ponen las cámaras y apps de Android:
+// 20220920_160509.jpg, IMG_20220920_160509.jpg, PXL_20220920_160509123.jpg, Screenshot_20220920-160509.png,
+// VID_20220920_160509.mp4, IMG-20220920-WA0001.jpg (WhatsApp: solo el día)
+export function dateFromName(name) {
+  let m = /(?:^|\D)(20\d{2}|19\d{2})(\d{2})(\d{2})[_-](\d{2})(\d{2})(\d{2})/.exec(name);
+  if (m) {
+    const [, y, mo, d, h, mi, s] = m.map(Number);
+    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31 && h < 24 && mi < 60 && s < 60) return new Date(y, mo - 1, d, h, mi, s).getTime();
+  }
+  m = /(?:^|\D)(20\d{2})(\d{2})(\d{2})(?:\D|$)/.exec(name);
+  if (m) {
+    const [, y, mo, d] = m.map(Number);
+    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return new Date(y, mo - 1, d, 12).getTime();
+  }
+  return 0;
+}
+
 export const typeOf = name =>
   PHOTO.test(name) ? 'photo' : PNG.test(name) ? 'png' : VIDEO.test(name) ? 'video' : HEIC.test(name) ? 'heic' : null;
 
@@ -53,20 +73,23 @@ export async function listCandidates(root, onDir, signal) {
 // se reutiliza el resultado guardado sin volver a leer el contenido.
 export async function inspect(c, cached, wantVideo) {
   const file = await c.handle.getFile();
-  const same = cached && cached.size === file.size && cached.mtime === file.lastModified;
-  const info = { path: c.path, name: c.name, type: c.type, size: file.size, mtime: file.lastModified };
+  const same = cached && cached.v === RECORD_V && cached.size === file.size && cached.mtime === file.lastModified;
+  const info = {
+    v: RECORD_V, path: c.path, name: c.name, type: c.type, size: file.size, mtime: file.lastModified,
+    taken: dateFromName(c.name) || file.lastModified,
+  };
   if (c.type === 'photo') {
-    if (same && 'compacted' in cached) return { file, info: { ...cached, ...info }, fresh: false };
+    if (same && 'compacted' in cached) return { file, info: { ...cached, ...info, taken: cached.taken }, fresh: false };
     const head = await readJpegInfo(file);
     if (!head.isJpeg) return { file, info: null, fresh: true };
     const { motion, special, pano, hdr, compacted } = head;
-    return { file, info: { ...info, motion, special, pano, hdr, compacted }, fresh: true };
+    return { file, info: { ...info, motion, special, pano, hdr, compacted, taken: head.taken || info.taken }, fresh: true };
   }
   if (c.type === 'video') {
-    if (same && (cached.meta !== undefined || !wantVideo)) return { file, info: { ...cached, ...info }, fresh: false };
+    if (same && (cached.meta !== undefined || !wantVideo)) return { file, info: { ...cached, ...info, taken: cached.taken }, fresh: false };
     if (!wantVideo) return { file, info, fresh: !same };
     const meta = await quickProbe(file).catch(() => null);
-    return { file, info: { ...info, meta }, fresh: true };
+    return { file, info: { ...info, meta, taken: meta?.created || info.taken }, fresh: true };
   }
   return { file, info, fresh: !same }; // png
 }
@@ -166,6 +189,7 @@ export async function restore(root, rec) {
   await dir.removeEntry(rec.finalName).catch(() => {});
   const name = await uniqueName(dir, rec.name);
   await moveFile(tdir, th, dir, name);
+  return name;
 }
 
 export async function emptyTrash(root) {

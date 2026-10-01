@@ -47,11 +47,13 @@ export async function quickProbe(file) {
   const moov = await readMoov(file);
   if (!moov) return null;
   const mvhd = child(moov.u8, 'mvhd');
-  let duration = 0;
+  let duration = 0, created = 0;
   if (mvhd) {
     const d = view(mvhd), v1 = d.getUint8(8) === 1;
     const scale = d.getUint32(v1 ? 28 : 20), dur = v1 ? Number(d.getBigUint64(32)) : d.getUint32(24);
     duration = scale ? dur / scale : 0;
+    const secs = v1 ? Number(d.getBigUint64(12)) : d.getUint32(12);
+    if (secs > MAC_EPOCH) created = (secs - MAC_EPOCH) * 1000;
   }
   for (const trak of children(moov.u8).filter(b => b.type === 'trak')) {
     const mdia = child(trak.u8, 'mdia');
@@ -74,6 +76,7 @@ export async function quickProbe(file) {
       width: Math.round(rotated ? h : w), height: Math.round(rotated ? w : h),
       duration, fps: trackSecs && frames ? frames / trackSecs : 30,
       bitrate: duration ? file.size * 8 / duration : 0,
+      created,
       compacted: includesAscii(moov.u8, MARK),
     };
   }

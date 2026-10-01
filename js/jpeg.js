@@ -17,6 +17,8 @@ export function parseJpegHeader(u8) {
     exif: null,          // Uint8Array con el payload de APP1 Exif (sin marcador ni longitud)
     orientation: 1,
     make: '',
+    taken: 0,            // fecha de captura (ms) según EXIF, 0 si no tiene
+    thumb: null,         // { off, len } de la miniatura que guarda la cámara dentro del EXIF
     motion: false,       // foto en movimiento (Google MicroVideo/MotionPhoto)
     special: false,      // retrato con profundidad editable (GDepth / Container de Google)
     pano: false,         // foto 360° (GPano)
@@ -37,7 +39,7 @@ export function parseJpegHeader(u8) {
     if (e > u8.length) { info.truncated = true; break; }
     if (m === 0xE1 && ascii(u8, s, 6) === 'Exif\0\0') {
       info.exif = u8.slice(s, e);
-      Object.assign(info, readIfd0(info.exif));
+      Object.assign(info, readExifInfo(info.exif));
     } else if (m === 0xE1 && ascii(u8, s, 28) === 'http://ns.adobe.com/xap/1.0/') {
       const xmp = latin1.decode(u8.subarray(s, e));
       if (/MotionPhoto\s*[=>]\s*["']?1|MicroVideo\s*[=>]\s*["']?1|MotionPhoto_Data/.test(xmp)) info.motion = true;
@@ -92,25 +94,64 @@ function walkIfd(dv, le, off, fn) {
   return next + 4 <= dv.byteLength ? next : 0; // posición del puntero al siguiente IFD
 }
 
-// Orientación y fabricante (IFD0).
-function readIfd0(exif) {
-  const out = { orientation: 1, make: '' };
+const readAscii = (dv, le, e, max = 64) => {
+  const count = dv.getUint32(e + 4, le);
+  const at = count <= 4 ? e + 8 : dv.getUint32(e + 8, le);
+  if (at + count > dv.byteLength) return '';
+  return String.fromCharCode(...new Uint8Array(dv.buffer, dv.byteOffset + at, Math.min(count, max))).replace(/\0.*$/, '');
+};
+
+// "2022:09:20 16:05:09" (+ "-06:00" si la cámara guardó la zona) -> milisegundos
+export function parseExifDate(stamp, offset) {
+  const m = /^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})/.exec(stamp || '');
+  if (!m || m[1] === '0000') return 0;
+  const [, y, mo, d, h, mi, se] = m.map(Number);
+  const o = /^([+-])(\d{2}):(\d{2})$/.exec(offset || '');
+  if (o) return Date.UTC(y, mo - 1, d, h, mi, se) - (o[1] === '-' ? -1 : 1) * (Number(o[2]) * 60 + Number(o[3])) * 60000;
+  return new Date(y, mo - 1, d, h, mi, se).getTime();
+}
+
+// Orientación, fabricante, fecha de captura y ubicación de la miniatura interna.
+function readExifInfo(exif) {
+  const out = { orientation: 1, make: '', taken: 0, thumb: null };
   try {
     const { dv, le } = tiff(exif);
-    walkIfd(dv, le, dv.getUint32(4, le), (tag, e) => {
+    let exifIfd = 0, stamp = '', offset = '';
+    const next = walkIfd(dv, le, dv.getUint32(4, le), (tag, e) => {
       if (tag === 0x0112) {
         const o = dv.getUint16(e + 8, le);
         if (o >= 1 && o <= 8) out.orientation = o;
-      } else if (tag === 0x010F) {
-        const count = dv.getUint32(e + 4, le);
-        const at = count <= 4 ? e + 8 : dv.getUint32(e + 8, le);
-        if (at + count <= dv.byteLength) {
-          out.make = String.fromCharCode(...new Uint8Array(dv.buffer, dv.byteOffset + at, Math.min(count, 64))).replace(/\0.*$/, '');
-        }
-      }
+      } else if (tag === 0x010F) out.make = readAscii(dv, le, e);
+      else if (tag === 0x8769) exifIfd = dv.getUint32(e + 8, le);
+      else if (tag === 0x0132 && !stamp) stamp = readAscii(dv, le, e); // DateTime, por si falta la original
     });
+    if (exifIfd) {
+      walkIfd(dv, le, exifIfd, (tag, e) => {
+        if (tag === 0x9003) stamp = readAscii(dv, le, e);
+        else if (tag === 0x9011) offset = readAscii(dv, le, e);
+      });
+    }
+    out.taken = parseExifDate(stamp, offset);
+    // IFD1: la miniatura JPEG que guarda la cámara (unos 10 KB, sin girar)
+    const ifd1 = next ? dv.getUint32(next, le) : 0;
+    if (ifd1) {
+      let off = 0, len = 0;
+      walkIfd(dv, le, ifd1, (tag, e) => {
+        if (tag === 0x0201) off = dv.getUint32(e + 8, le);
+        else if (tag === 0x0202) len = dv.getUint32(e + 8, le);
+      });
+      if (off && len && off + len <= dv.byteLength) out.thumb = { off, len };
+    }
   } catch { /* EXIF dañado: valores por omisión */ }
   return out;
+}
+
+// Bytes de la miniatura interna (JPEG) a partir del payload EXIF, o null.
+export function exifThumbnail(exif, thumb) {
+  if (!exif || !thumb) return null;
+  const start = 6 + thumb.off;
+  const bytes = exif.subarray(start, start + thumb.len);
+  return bytes[0] === 0xFF && bytes[1] === 0xD8 ? bytes.slice() : null;
 }
 
 // Copia del EXIF original ajustada a la imagen nueva: orientación 1 (los píxeles ya van girados),
